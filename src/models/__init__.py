@@ -16,13 +16,13 @@ Layer 7 (Derived Variable: VPD), Layer 8 (Event-based metric)은 model 외부
 from .embedding import FeatureEmbedding
 from .pooling import LastMeanPooling
 from .decoder import MLPDecoder
-from .backbones import build_backbone, LSTMBackbone, BACKBONE_NAMES
+from .backbones import build_backbone, LSTMBackbone, TransformerBackbone, BACKBONE_NAMES
 from .forecasting import ForecastingModel
 
 __all__ = [
     'FeatureEmbedding',
     'LastMeanPooling',
     'MLPDecoder',
-    'build_backbone', 'LSTMBackbone', 'BACKBONE_NAMES',
+    'build_backbone', 'LSTMBackbone', 'TransformerBackbone', 'BACKBONE_NAMES',
     'ForecastingModel',
 ]

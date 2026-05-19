@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     pass
 
 from .lstm import LSTMBackbone
+from .transformer import TransformerBackbone
 
 
 BACKBONE_NAMES = ('lstm', 'transformer', 'mamba')
@@ -45,7 +46,6 @@ def build_backbone(name: str, **overrides) -> nn.Module:
     if name == 'lstm':
         return LSTMBackbone(**overrides)
     elif name == 'transformer':
-        from .transformer import TransformerBackbone   # late import
         return TransformerBackbone(**overrides)
     elif name == 'mamba':
         from .mamba import MambaBackbone               # late import (optional dep)
@@ -55,4 +55,4 @@ def build_backbone(name: str, **overrides) -> nn.Module:
     )
 
 
-__all__ = ['build_backbone', 'BACKBONE_NAMES', 'LSTMBackbone']
+__all__ = ['build_backbone', 'BACKBONE_NAMES', 'LSTMBackbone', 'TransformerBackbone']
