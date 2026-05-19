@@ -272,22 +272,32 @@ class Trainer:
         self.model.eval()
         loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-        all_y_true, all_y_pred = [], []
+        all_y_true, all_y_pred, all_y_persist = [], [], []
+        feature_cols = list(test_dataset.feature_cols)
+        target_cols = list(test_dataset.target_cols)
+        target_feature_idx = [feature_cols.index(c) for c in target_cols]
         for x, y in loader:
+            persist = x[:, -1, target_feature_idx].numpy()
             x = x.to(self.device)
             y_hat = self.model(x).cpu().numpy()
             all_y_true.append(y.numpy())
             all_y_pred.append(y_hat)
+            all_y_persist.append(
+                M.persistence_predict(persist, horizon=test_dataset.horizon)
+            )
 
         y_true_scaled = np.concatenate(all_y_true, axis=0)   # (n, H, V)
         y_pred_scaled = np.concatenate(all_y_pred, axis=0)
+        y_persist_scaled = np.concatenate(all_y_persist, axis=0)
 
         # Inverse transform to raw units
         scaler = test_dataset.scaler
         numeric_cols = test_dataset.numeric_cols
-        target_cols = test_dataset.target_cols
         y_true = M.inverse_transform_Y(y_true_scaled, scaler, target_cols, numeric_cols)
         y_pred = M.inverse_transform_Y(y_pred_scaled, scaler, target_cols, numeric_cols)
+        y_persist = M.inverse_transform_Y(
+            y_persist_scaled, scaler, target_cols, numeric_cols
+        )
 
         # Horizon summary (per variable × {1h, 6h, 24h} × {point, cumulative})
         # Naive MAE scale: 학습 시점에 train DataFrame이 필요하지만 여기선
@@ -303,10 +313,14 @@ class Trainer:
         summary = M.horizon_summary(
             y_true, y_pred, target_cols, naive_mae_scale=naive_scale,
         )
+        persistence_summary = M.horizon_summary(
+            y_true, y_persist, target_cols, naive_mae_scale=naive_scale,
+        )
 
         # Aggregate scalar metrics (전체 horizon × samples)
         results: dict[str, Any] = {
             'horizon_summary': summary,
+            'persistence_horizon_summary': persistence_summary,
             'best_epoch': self.checkpoint.best_epoch,
             'best_val_loss': self.checkpoint.best,
             'naive_scale': dict(zip(target_cols, [float(v) for v in naive_scale])),
@@ -314,17 +328,35 @@ class Trainer:
         for v_i, name in enumerate(target_cols):
             yt = y_true[:, :, v_i]
             yp = y_pred[:, :, v_i]
+            yn = y_persist[:, :, v_i]
+            model_mae = M.mae(yt, yp)
+            persistence_mae = M.mae(yt, yn)
             results[f'mae_{name}']   = float(M.mae(yt, yp))
             results[f'rmse_{name}']  = float(M.rmse(yt, yp))
             results[f'r2_{name}']    = float(M.r2(yt, yp))
             results[f'nmae_{name}']  = float(M.nmae(yt, yp, var_std[v_i]))
             results[f'nrmse_{name}'] = float(M.nrmse(yt, yp, var_std[v_i]))
             results[f'mase_{name}']  = float(M.mase(yt, yp, naive_scale[v_i]))
+            results[f'persistence_mae_{name}'] = float(persistence_mae)
+            results[f'persistence_rmse_{name}'] = float(M.rmse(yt, yn))
+            results[f'persistence_r2_{name}'] = float(M.r2(yt, yn))
+            results[f'relative_mae_{name}'] = float(
+                model_mae / max(persistence_mae, 1e-12)
+            )
 
         # Derived VPD
         vpd_mae, _, _ = M.vpd_metric_from_targets(y_true, y_pred, target_cols, M.mae)
         vpd_rmse, _, _ = M.vpd_metric_from_targets(y_true, y_pred, target_cols, M.rmse)
+        persist_vpd_mae, _, _ = M.vpd_metric_from_targets(
+            y_true, y_persist, target_cols, M.mae
+        )
+        persist_vpd_rmse, _, _ = M.vpd_metric_from_targets(
+            y_true, y_persist, target_cols, M.rmse
+        )
         results['vpd_mae'] = float(vpd_mae)
         results['vpd_rmse'] = float(vpd_rmse)
+        results['persistence_vpd_mae'] = float(persist_vpd_mae)
+        results['persistence_vpd_rmse'] = float(persist_vpd_rmse)
+        results['relative_mae_VPD'] = float(vpd_mae / max(persist_vpd_mae, 1e-12))
 
         return results
