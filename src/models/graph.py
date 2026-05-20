@@ -30,10 +30,12 @@ D 단계 (event-window evaluation) 결과:
     → co2_dos → CO2air`) 같은 multi-hop은 변수 순서대로 직접 edge로 표현하면
     1-hop으로 충분.
 
-- **Time pool 먼저 (variable-wise 평균):**
-    Per-timestep graph는 (B, L, F, D) 텐서 → 메모리 폭증. baseline에서는
-    time average 한 번 후 graph 적용 → (B, F, D). event-window 변동은
-    backbone에서 잡고, graph는 정적 인과 구조만.
+- **Per-timestep message passing (β 패턴, 2026-05-20 변경):**
+    초기 설계는 time-pool 먼저 (variable static graph) 였으나, 본 연구의
+    핵심이 event 직후 delayed response이므로 graph가 temporal 정보를 보존
+    해야 함. (B, L, F, D) 중간 텐서 — D=128, L=288, F=74, B=32에서 약
+    350 MB (float32). A40 (46 GB) 환경에선 무난. 학습 속도 1.3-1.5x 느려짐
+    예상.
 
 - **Prior + Learned 두 가지 모드:**
     `mode='prior'`: hard-coded 0/1 edges (도메인 지식)
@@ -48,7 +50,7 @@ D 단계 (event-window evaluation) 결과:
 입출력 contract
 
     Input:  X  (B, L, F)
-    Output: g  (B, D)  — graph context
+    Output: g  (B, L, D)  — per-timestep graph context (β 패턴)
 
 ────────────────────────────────────────────────────────────────────────────
 논문 작성 참고
@@ -193,14 +195,14 @@ def build_prior_adjacency(
 class DirectedGraphModule(nn.Module):
     """Variable-level directed graph with 1-hop message passing.
 
-    Pipeline:
+    Pipeline (β 패턴, per-timestep):
         X (B, L, F)
-          → time avg                                    (B, F)
-          → per-variable embed (Linear 1 → D)           (B, F, D)
-          → directed message passing: h' = h + adj.T @ msg_proj(h)
-          → LayerNorm                                   (B, F, D)
-          → mean over F (readout)                       (B, D)
-          → final Linear                                (B, D)
+          → per-(t, v) embed: Linear(1 → D), broadcast    (B, L, F, D)
+          → directed message passing per timestep:
+              h'[t,v] = h[t,v] + Σ_{u: adj[u,v]>0} msg_proj(h[t,u])
+          → LayerNorm                                     (B, L, F, D)
+          → mean over F (readout)                         (B, L, D)
+          → final Linear + LayerNorm                      (B, L, D)
 
     Args:
         input_dim:     F. feature_group에 따라 8/18/38/58/74.
@@ -213,7 +215,7 @@ class DirectedGraphModule(nn.Module):
 
     Shape:
         in  : (B, L, F)
-        out : (B, D)
+        out : (B, L, D)
     """
 
     def __init__(
@@ -273,7 +275,7 @@ class DirectedGraphModule(nn.Module):
             x: (B, L, F) — same input as backbone (raw scaled feature window).
 
         Returns:
-            (B, D) graph context vector.
+            (B, L, D) per-timestep graph context (β 패턴).
         """
         if x.ndim != 3:
             raise ValueError(
@@ -285,23 +287,21 @@ class DirectedGraphModule(nn.Module):
                 f"got x.shape[-1]={x.shape[-1]}."
             )
 
-        # 1. Time pool (variable-wise mean over L)
-        x_avg = x.mean(dim=1)                     # (B, F)
-        x_var = x_avg.unsqueeze(-1)               # (B, F, 1)
+        # 1. Per-(t, v) embed: scalar → d_model
+        # x.unsqueeze(-1): (B, L, F) → (B, L, F, 1)
+        # self.embed: Linear(1 → D)
+        h = self.embed(x.unsqueeze(-1))           # (B, L, F, D)
 
-        # 2. Per-variable embed
-        h = self.embed(x_var)                     # (B, F, D)
+        # 2. Per-timestep directed message passing (1 hop)
+        msg = self.msg_proj(h)                    # (B, L, F, D)
+        # h_new[t, v] = sum over u where adj[u, v] > 0 of msg[t, u]
+        # einsum: 'uv, blud -> blvd'
+        agg = torch.einsum('uv,blud->blvd', self.adj, msg)
+        h_out = self.norm(h + agg)                # residual + LN (per-(t, v, D))
 
-        # 3. Directed message passing (1 hop)
-        msg = self.msg_proj(h)                    # (B, F, D)
-        # h_new[v] = sum over u where adj[u, v] > 0 of msg[u]
-        # einsum: 'uv, bud -> bvd'
-        agg = torch.einsum('uv,bud->bvd', self.adj, msg)
-        h_out = self.norm(h + agg)                # residual + LN
-
-        # 4. Readout: mean over variables (F축 축약)
-        z = h_out.mean(dim=1)                     # (B, D)
-        return self.readout_norm(self.readout(z)) # (B, D)
+        # 3. Per-timestep readout: mean over variables (F축 축약)
+        z = h_out.mean(dim=2)                     # (B, L, D)
+        return self.readout_norm(self.readout(z)) # (B, L, D)
 
     def extra_repr(self) -> str:
         n_params = sum(p.numel() for p in self.parameters())
