@@ -124,6 +124,8 @@ def predict_scaled(
         horizon=dataset.horizon,
         target_dim=dataset.target_dim,
         decoder_hidden_dim=int(config["decoder_hidden_dim"]),
+        graph_mode=config.get("graph_mode"),
+        feature_cols=dataset.feature_cols if config.get("graph_mode") is not None else None,
     )
     state = torch.load(run_dir / "model_best.pt", map_location=device)
     model.load_state_dict(state)

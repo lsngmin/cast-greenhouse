@@ -52,6 +52,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-group", default="sensor+weather+state+sp+vip")
     parser.add_argument("--backbone", default="lstm",
                         help="Backbone name passed to ForecastingModel.")
+    parser.add_argument("--graph-mode", default=None,
+                        choices=["prior", "learned", "prior_learned"],
+                        help="Directed graph module. None=baseline, prior=domain-informed, "
+                             "learned=random-init learnable, prior_learned=prior-init learnable.")
 
     parser.add_argument("--data-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--out-dir", type=Path, default=Path("results/runs"))
@@ -84,7 +88,8 @@ def make_run_name(args: argparse.Namespace) -> str:
         return args.run_name
     split_name = args.compartment if args.mode == "single" else f"holdout-{args.holdout}"
     group = args.feature_group.replace("+", "_")
-    return f"{args.mode}_{split_name}_{args.backbone}_{group}_seed{args.seed}"
+    graph_tag = f"_g{args.graph_mode}" if args.graph_mode else ""
+    return f"{args.mode}_{split_name}_{args.backbone}{graph_tag}_{group}_seed{args.seed}"
 
 
 def build_datasets(args: argparse.Namespace) -> tuple[Any, Any, WindowDataset]:
@@ -154,6 +159,8 @@ def main() -> None:
         horizon=args.horizon,
         target_dim=shape_ds.target_dim,
         decoder_hidden_dim=args.decoder_hidden_dim,
+        graph_mode=args.graph_mode,
+        feature_cols=shape_ds.feature_cols if args.graph_mode is not None else None,
     )
 
     train_loader = dataloader(train_ds, args.batch_size, shuffle=True,

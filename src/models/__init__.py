@@ -17,6 +17,8 @@ from .embedding import FeatureEmbedding
 from .pooling import LastMeanPooling
 from .decoder import MLPDecoder
 from .backbones import build_backbone, LSTMBackbone, TransformerBackbone, BACKBONE_NAMES
+from .graph import DirectedGraphModule, build_prior_adjacency, PRIOR_EDGES
+from .fusion import TemporalGraphFusion
 from .forecasting import ForecastingModel
 
 __all__ = [
@@ -24,5 +26,7 @@ __all__ = [
     'LastMeanPooling',
     'MLPDecoder',
     'build_backbone', 'LSTMBackbone', 'TransformerBackbone', 'BACKBONE_NAMES',
+    'DirectedGraphModule', 'build_prior_adjacency', 'PRIOR_EDGES',
+    'TemporalGraphFusion',
     'ForecastingModel',
 ]

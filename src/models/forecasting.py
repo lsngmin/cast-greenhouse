@@ -89,6 +89,8 @@ from .embedding import FeatureEmbedding
 from .pooling import LastMeanPooling
 from .decoder import MLPDecoder
 from .backbones import build_backbone
+from .graph import DirectedGraphModule, build_prior_adjacency
+from .fusion import TemporalGraphFusion
 
 if TYPE_CHECKING:
     from src.data.window_dataset import WindowDataset
@@ -105,6 +107,11 @@ class ForecastingModel(nn.Module):
         target_dim:          출력 변수 수 V. default 3 (Tair, Rhair, CO2air).
         decoder_hidden_dim:  MLPDecoder hidden. default 256.
         backbone_kwargs:     backbone factory에 전달할 override (ablation용).
+        graph_mode:          None | 'prior' | 'learned' | 'prior_learned'.
+                             None이면 graph 미사용 (baseline). 나머지는
+                             Layer 4 (Directed Graph Module) 활성화.
+        feature_cols:        graph_mode != None일 때 필요. WindowDataset.feature_cols.
+                             Prior adjacency 생성 시 변수 이름 → index 매핑.
 
     Shape:
         in  : (B, L, F)
@@ -120,6 +127,8 @@ class ForecastingModel(nn.Module):
         target_dim: int = 3,
         decoder_hidden_dim: int = 256,
         backbone_kwargs: dict | None = None,
+        graph_mode: str | None = None,
+        feature_cols: list[str] | None = None,
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -127,6 +136,7 @@ class ForecastingModel(nn.Module):
         self.d_model = d_model
         self.horizon = horizon
         self.target_dim = target_dim
+        self.graph_mode = graph_mode
 
         bb_kwargs = dict(backbone_kwargs) if backbone_kwargs else {}
         # backbone factory에 d_model을 명시 전달 (override 없으면 default 128)
@@ -136,8 +146,35 @@ class ForecastingModel(nn.Module):
         self.embed = FeatureEmbedding(input_dim=input_dim, d_model=d_model)
         # Layer 3 (swappable)
         self.backbone = build_backbone(backbone_name, **bb_kwargs)
-        # Layer 5
-        self.pool = LastMeanPooling(d_model=d_model)
+
+        # Layer 4 (optional) + Layer 5 fusion / pool
+        if graph_mode is None:
+            self.graph = None
+            self.pool = LastMeanPooling(d_model=d_model)
+        else:
+            # Prior adjacency 생성 (feature_cols 기반)
+            if graph_mode in ('prior', 'prior_learned'):
+                if feature_cols is None:
+                    raise ValueError(
+                        f"graph_mode={graph_mode!r} requires feature_cols (변수 이름 list)."
+                    )
+                if len(feature_cols) != input_dim:
+                    raise ValueError(
+                        f"len(feature_cols)={len(feature_cols)} != input_dim={input_dim}"
+                    )
+                adj = build_prior_adjacency(feature_cols)
+            else:  # 'learned' — random init
+                adj = None
+
+            self.graph = DirectedGraphModule(
+                input_dim=input_dim,
+                d_model=d_model,
+                adjacency=adj,
+                mode=graph_mode,
+            )
+            # Pool 위치에 fusion 모듈 (Pool을 내부에서 contain)
+            self.pool = TemporalGraphFusion(d_model=d_model)
+
         # Layer 6
         self.decoder = MLPDecoder(
             d_model=d_model,
@@ -154,13 +191,14 @@ class ForecastingModel(nn.Module):
         d_model: int = 128,
         decoder_hidden_dim: int = 256,
         backbone_kwargs: dict | None = None,
+        graph_mode: str | None = None,
     ) -> 'ForecastingModel':
-        """WindowDataset에서 input_dim, horizon, target_dim 자동 추출.
+        """WindowDataset에서 input_dim, horizon, target_dim, feature_cols 자동 추출.
 
         Example:
             ds = WindowDataset('Reference', 'train', 'sensor+weather+state+sp+vip')
-            model = ForecastingModel.from_dataset(ds)        # LSTM default
-            model = ForecastingModel.from_dataset(ds, 'transformer')
+            model = ForecastingModel.from_dataset(ds)                            # baseline
+            model = ForecastingModel.from_dataset(ds, 'mamba', graph_mode='prior')  # 제안 모델
         """
         return cls(
             input_dim=dataset.feature_dim,
@@ -170,6 +208,8 @@ class ForecastingModel(nn.Module):
             target_dim=dataset.target_dim,
             decoder_hidden_dim=decoder_hidden_dim,
             backbone_kwargs=backbone_kwargs,
+            graph_mode=graph_mode,
+            feature_cols=dataset.feature_cols if graph_mode is not None else None,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -182,7 +222,11 @@ class ForecastingModel(nn.Module):
         """
         h = self.embed(x)            # (B, L, F)  → (B, L, D)
         h = self.backbone(h)         # (B, L, D)  → (B, L, D)
-        c = self.pool(h)             # (B, L, D)  → (B, D)
+        if self.graph is not None:
+            g = self.graph(x)        # (B, L, F)  → (B, D)  — uses raw input
+            c = self.pool(h, g)      # TemporalGraphFusion: (B, L, D), (B, D) → (B, D)
+        else:
+            c = self.pool(h)         # LastMeanPooling: (B, L, D) → (B, D)
         y = self.decoder(c)          # (B, D)     → (B, H, V)
         return y
 
@@ -194,7 +238,9 @@ class ForecastingModel(nn.Module):
             'pool':     sum(p.numel() for p in self.pool.parameters()),
             'decoder':  sum(p.numel() for p in self.decoder.parameters()),
         }
-        per_layer['total'] = sum(per_layer.values())
+        if self.graph is not None:
+            per_layer['graph'] = sum(p.numel() for p in self.graph.parameters())
+        per_layer['total'] = sum(v for k, v in per_layer.items() if k != 'total')
         return per_layer
 
     def extra_repr(self) -> str:
