@@ -183,11 +183,15 @@ def summarize_event(
 ) -> list[dict[str, Any]]:
     rows = []
     for target_i, target in enumerate(target_cols):
-        model = M.event_window_mae(
-            y_true, y_pred, event_starts, window_steps, target_index=target_i
+        model = fast_event_window_mae(
+            np.abs(y_true[:, :, target_i] - y_pred[:, :, target_i]),
+            event_starts,
+            window_steps,
         )
-        persist = M.event_window_mae(
-            y_true, y_persist, event_starts, window_steps, target_index=target_i
+        persist = fast_event_window_mae(
+            np.abs(y_true[:, :, target_i] - y_persist[:, :, target_i]),
+            event_starts,
+            window_steps,
         )
         rows.append({
             "target": target,
@@ -206,13 +210,11 @@ def summarize_event(
     _, _, vpd_persist = M.vpd_metric_from_targets(
         y_true, y_persist, target_cols, M.mae
     )
-    model = M.event_window_mae(
-        vpd_true[..., None], vpd_pred[..., None], event_starts, window_steps,
-        target_index=0,
+    model = fast_event_window_mae(
+        np.abs(vpd_true - vpd_pred), event_starts, window_steps
     )
-    persist = M.event_window_mae(
-        vpd_true[..., None], vpd_persist[..., None], event_starts, window_steps,
-        target_index=0,
+    persist = fast_event_window_mae(
+        np.abs(vpd_true - vpd_persist), event_starts, window_steps
     )
     rows.append({
         "target": "VPD",
@@ -225,6 +227,53 @@ def summarize_event(
         "relative_mae": model["mean"] / max(persist["mean"], 1e-12),
     })
     return rows
+
+
+def fast_event_window_mae(
+    abs_error: np.ndarray,
+    event_starts: list[tuple[int, int]],
+    window_steps: int,
+) -> dict[str, float | int]:
+    """Vectorized event-window MAE from a precomputed absolute-error matrix."""
+    if not event_starts:
+        return {"mean": float("nan"), "std": float("nan"), "n": 0}
+
+    err = np.asarray(abs_error, dtype=np.float64)
+    n_samples, horizon = err.shape
+    events = np.asarray(event_starts, dtype=np.int64)
+    sample_i = events[:, 0]
+    start = events[:, 1]
+    valid = (
+        (sample_i >= 0) & (sample_i < n_samples)
+        & (start >= 0) & (start < horizon)
+    )
+    if not np.any(valid):
+        return {"mean": float("nan"), "std": float("nan"), "n": 0}
+
+    sample_i = sample_i[valid]
+    start = start[valid]
+    end = np.minimum(start + window_steps, horizon)
+
+    finite = np.isfinite(err)
+    values = np.where(finite, err, 0.0)
+    value_prefix = np.concatenate(
+        [np.zeros((n_samples, 1), dtype=np.float64), np.cumsum(values, axis=1)],
+        axis=1,
+    )
+    count_prefix = np.concatenate(
+        [np.zeros((n_samples, 1), dtype=np.float64), np.cumsum(finite, axis=1)],
+        axis=1,
+    )
+
+    sums = value_prefix[sample_i, end] - value_prefix[sample_i, start]
+    counts = count_prefix[sample_i, end] - count_prefix[sample_i, start]
+    per_event = sums / np.maximum(counts, 1.0)
+    per_event[counts <= 0] = np.nan
+    return {
+        "mean": float(np.nanmean(per_event)),
+        "std": float(np.nanstd(per_event)),
+        "n": int(np.sum(np.isfinite(per_event))),
+    }
 
 
 def evaluate_run(
