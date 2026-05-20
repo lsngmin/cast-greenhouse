@@ -5,7 +5,7 @@
 
     fit(max_epochs):
         - 매 epoch: train_epoch → validate → scheduler.step(val_loss)
-        - EarlyStopping(patience=5) 시 중단
+        - EarlyStopping(patience=10) 시 중단
         - BestCheckpoint: val loss 최저 시 model state 저장 → 종료 후 복원
         - history (DataFrame: epoch, train_loss, val_loss, lr) 반환
 
@@ -120,7 +120,7 @@ class Trainer:
         criterion: nn.Module | None = None,
         optimizer_kwargs: dict | None = None,
         scheduler_kwargs: dict | None = None,
-        early_stopping: EarlyStopping | int | None = 5,
+        early_stopping: EarlyStopping | int | None = 10,
         device: str | torch.device | None = None,
         seed: int | None = 42,
         max_grad_norm: float | None = 1.0,
