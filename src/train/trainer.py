@@ -157,6 +157,28 @@ class Trainer:
             self.early_stopping = early_stopping
         self.checkpoint = BestCheckpoint(mode='min')
 
+    @staticmethod
+    def _unpack_batch(batch):
+        if len(batch) == 2:
+            x, y = batch
+            return x, y, None
+        if len(batch) == 3:
+            x, y, event_weight = batch
+            return x, y, event_weight
+        raise ValueError(f"Expected batch with 2 or 3 tensors, got {len(batch)}.")
+
+    def _compute_loss(
+        self,
+        y_hat: torch.Tensor,
+        y: torch.Tensor,
+        event_weight: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if event_weight is not None and getattr(
+            self.criterion, 'supports_event_weight', False
+        ):
+            return self.criterion(y_hat, y, event_weight=event_weight)
+        return self.criterion(y_hat, y)
+
     # -----------------------------------------------------------------------
     # Training / validation loops
 
@@ -164,13 +186,16 @@ class Trainer:
         """Run one training epoch. Returns mean batch loss."""
         self.model.train()
         total_loss, total_n = 0.0, 0
-        for x, y in self.train_loader:
+        for batch in self.train_loader:
+            x, y, event_weight = self._unpack_batch(batch)
             x = x.to(self.device)
             y = y.to(self.device)
+            if event_weight is not None:
+                event_weight = event_weight.to(self.device)
 
             self.optimizer.zero_grad(set_to_none=True)
             y_hat = self.model(x)
-            loss = self.criterion(y_hat, y)
+            loss = self._compute_loss(y_hat, y, event_weight)
             loss.backward()
             if self.max_grad_norm is not None:
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
@@ -186,11 +211,14 @@ class Trainer:
         """Run one validation pass. Returns mean batch loss."""
         self.model.eval()
         total_loss, total_n = 0.0, 0
-        for x, y in self.val_loader:
+        for batch in self.val_loader:
+            x, y, event_weight = self._unpack_batch(batch)
             x = x.to(self.device)
             y = y.to(self.device)
+            if event_weight is not None:
+                event_weight = event_weight.to(self.device)
             y_hat = self.model(x)
-            loss = self.criterion(y_hat, y)
+            loss = self._compute_loss(y_hat, y, event_weight)
             bs = x.shape[0]
             total_loss += loss.item() * bs
             total_n += bs
@@ -275,7 +303,8 @@ class Trainer:
         feature_cols = list(test_dataset.feature_cols)
         target_cols = list(test_dataset.target_cols)
         target_feature_idx = [feature_cols.index(c) for c in target_cols]
-        for x, y in loader:
+        for batch in loader:
+            x, y, _ = self._unpack_batch(batch)
             persist = x[:, -1, target_feature_idx].numpy()
             x = x.to(self.device)
             y_hat = self.model(x).cpu().numpy()
