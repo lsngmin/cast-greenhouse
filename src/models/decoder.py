@@ -65,7 +65,7 @@ Pool layer (Step 5)가 backbone 출력 (B, L, D)를 (B, D)로 압축한 context
     Output: y_hat   (B, H, V)    forecast trajectory in scaled units
 
     H = horizon steps (default 288 = 24h)
-    V = target dim (default 3 = Tair, Rhair, CO2air; VPD는 derived)
+    V = target dim (default 3 = Tair, Rhair, CO2air)
 
 ────────────────────────────────────────────────────────────────────────────
 구조적 주의 — single context bottleneck (상속)
