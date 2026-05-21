@@ -265,7 +265,6 @@ class Trainer:
                   `nmae_<name>`, `nrmse_<name>`, `mase_<name>`
               - 'horizon_summary': DataFrame per (variable, horizon, kind)
                   with columns MAE/RMSE/R2/MASE for {1h, 6h, 24h} × {point, cumulative}
-              - 'vpd_mae', 'vpd_rmse' (derived from predicted Tair/Rhair)
               - 'naive_scale': MASE 분모 (per target)
               - 'best_epoch', 'best_val_loss' (from fit())
         """
@@ -343,20 +342,5 @@ class Trainer:
             results[f'relative_mae_{name}'] = float(
                 model_mae / max(persistence_mae, 1e-12)
             )
-
-        # Derived VPD
-        vpd_mae, _, _ = M.vpd_metric_from_targets(y_true, y_pred, target_cols, M.mae)
-        vpd_rmse, _, _ = M.vpd_metric_from_targets(y_true, y_pred, target_cols, M.rmse)
-        persist_vpd_mae, _, _ = M.vpd_metric_from_targets(
-            y_true, y_persist, target_cols, M.mae
-        )
-        persist_vpd_rmse, _, _ = M.vpd_metric_from_targets(
-            y_true, y_persist, target_cols, M.rmse
-        )
-        results['vpd_mae'] = float(vpd_mae)
-        results['vpd_rmse'] = float(vpd_rmse)
-        results['persistence_vpd_mae'] = float(persist_vpd_mae)
-        results['persistence_vpd_rmse'] = float(persist_vpd_rmse)
-        results['relative_mae_VPD'] = float(vpd_mae / max(persist_vpd_mae, 1e-12))
 
         return results
