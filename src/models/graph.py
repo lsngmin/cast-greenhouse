@@ -22,8 +22,8 @@ D 단계 (event-window evaluation) 결과:
 설계 결정
 
 - **Variable-level graph (각 input feature = node):**
-    F=8~74 (feature_group 따라). 도메인 edge가 명확 (예: co2_sp → co2_vip).
-    feature_group ablation 시에도 자연스러움 (없는 변수의 edge는 자동 제외).
+    F=53 (curated set, fixed). 도메인 edge가 명확 (예: co2_sp → co2_vip).
+    데이터에 없는 변수의 edge는 자동 제외.
 
 - **Single-layer message passing:**
     1 hop. 깊은 GNN은 baseline overkill. Prior chain (`co2_sp → co2_vip
@@ -205,7 +205,7 @@ class DirectedGraphModule(nn.Module):
           → final Linear + LayerNorm                      (B, L, D)
 
     Args:
-        input_dim:     F. feature_group에 따라 8/18/38/58/74.
+        input_dim:     F = 53 (curated set).
         d_model:       hidden dim D. default 128 (다른 layer와 일관).
         adjacency:     (F, F) float tensor. None이면 zero adjacency (== no graph,
                        sanity 비교용).
