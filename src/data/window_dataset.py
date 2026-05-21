@@ -105,6 +105,11 @@ class WindowDataset(Dataset):
         horizon: int = 288,
         stride: int = 12,
         data_dir: Path | str = DEFAULT_DATA_DIR,
+        event_weight_mode: str = win.EVENT_WEIGHT_NONE,
+        event_loss_lambda: float = 0.5,
+        event_window_steps: int = 12,
+        event_decay_window_steps: int = 72,
+        event_decay_tau_steps: int = 24,
     ):
         super().__init__()
         self.compartment = compartment
@@ -117,16 +122,26 @@ class WindowDataset(Dataset):
             compartment=compartment,
             cfg=cfg,
             splits=(split,),
+            event_weight_mode=event_weight_mode,
+            event_loss_lambda=event_loss_lambda,
+            event_window_steps=event_window_steps,
+            event_decay_window_steps=event_decay_window_steps,
+            event_decay_tau_steps=event_decay_tau_steps,
         )
         split_data = bundle[split]
 
         # Eager numpy → torch (학습 루프 마다 cast 안 함)
         self.X = torch.from_numpy(split_data['X'])         # (n, L, F)
         self.Y = torch.from_numpy(split_data['Y'])         # (n, H, V)
+        self.event_weight = (
+            torch.from_numpy(split_data['event_weight'])
+            if 'event_weight' in split_data else None
+        )
         self.meta = split_data['meta']                     # pd.DataFrame
         self.feature_cols = bundle['feature_cols']
         self.target_cols = bundle['target_cols']
         self.cfg = cfg
+        self.event_weight_mode = event_weight_mode
 
         # Trainer.test()에서 inverse_transform_Y 호출 시 필요
         art = win.load_artifacts(self.data_dir)
@@ -152,14 +167,17 @@ class WindowDataset(Dataset):
     def __len__(self) -> int:
         return self.X.shape[0]
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int):
+        if self.event_weight is not None:
+            return self.X[idx], self.Y[idx], self.event_weight[idx]
         return self.X[idx], self.Y[idx]
 
     def __repr__(self) -> str:
         return (
             f"WindowDataset(compartment={self.compartment!r}, "
             f"split={self.split!r}, "
-            f"n={len(self)}, X={tuple(self.X.shape)}, Y={tuple(self.Y.shape)})"
+            f"n={len(self)}, X={tuple(self.X.shape)}, Y={tuple(self.Y.shape)}, "
+            f"event_weight_mode={self.event_weight_mode!r})"
         )
 
 
@@ -170,6 +188,11 @@ def make_concat_dataset(
     horizon: int = 288,
     stride: int = 12,
     data_dir: Path | str = DEFAULT_DATA_DIR,
+    event_weight_mode: str = win.EVENT_WEIGHT_NONE,
+    event_loss_lambda: float = 0.5,
+    event_window_steps: int = 12,
+    event_decay_window_steps: int = 72,
+    event_decay_tau_steps: int = 24,
 ) -> ConcatDataset:
     """여러 compartment를 합친 dataset (cross-compartment 학습용).
 
@@ -184,6 +207,11 @@ def make_concat_dataset(
         WindowDataset(
             compartment=c, split=split,
             lookback=lookback, horizon=horizon, stride=stride, data_dir=data_dir,
+            event_weight_mode=event_weight_mode,
+            event_loss_lambda=event_loss_lambda,
+            event_window_steps=event_window_steps,
+            event_decay_window_steps=event_decay_window_steps,
+            event_decay_tau_steps=event_decay_tau_steps,
         )
         for c in compartments
     ]
