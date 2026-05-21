@@ -130,10 +130,6 @@ def collect_alpha(model: ForecastingModel, dataset: WindowDataset,
 def export_run(run_dir: Path, splits: list[str], batch_size: int,
                device: torch.device) -> None:
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
-    if config.get("embedding_type") != "source_aware":
-        print(f"[skip] {run_dir.name}: embedding_type="
-              f"{config.get('embedding_type')!r} (need source_aware)")
-        return
 
     # Build model once; reuse for all splits
     # (input_dim is set by first dataset; verify on subsequent splits)
@@ -148,7 +144,6 @@ def export_run(run_dir: Path, splits: list[str], batch_size: int,
         decoder_type=config.get("decoder_type", "mlp"),
         graph_mode=config.get("graph_mode"),
         feature_cols=first_ds.feature_cols,
-        embedding_type="source_aware",
         gate_temperature=float(config.get("gate_temperature", 1.0)),
     )
     state = torch.load(run_dir / "model_best.pt", map_location=device)
