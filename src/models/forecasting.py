@@ -85,9 +85,9 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .embedding import FeatureEmbedding, SourceAwareEmbedding
+from .embedding import SourceAwareEmbedding
 from .pooling import LastMeanPooling
-from .decoder import HorizonQueryDecoder, MLPDecoder
+from .decoder import HorizonQueryDecoder, MLPDecoder, TargetHeadMLPDecoder
 from .backbones import build_backbone
 from .graph import DirectedGraphModule, build_prior_adjacency
 from .fusion import TemporalGraphFusion
@@ -105,19 +105,16 @@ class ForecastingModel(nn.Module):
         d_model:             내부 hidden dim D. default 128.
         horizon:             출력 step 수 H. default 288 (24h).
         target_dim:          출력 변수 수 V. default 3 (Tair, Rhair, CO2air).
-        decoder_hidden_dim:  MLPDecoder hidden. default 256.
-        decoder_type:        'mlp' | 'horizon_query'. default 'mlp'.
+        decoder_hidden_dim:  decoder hidden dim (shared trunk for target_head). default 256.
+        decoder_type:        'mlp' | 'horizon_query' | 'target_head'. default 'mlp'.
+                             target_head uses head_hidden = decoder_hidden_dim // 2.
         backbone_kwargs:     backbone factory에 전달할 override (ablation용).
         graph_mode:          None | 'prior' | 'learned' | 'prior_learned'.
                              None이면 graph 미사용 (baseline). 나머지는
                              Layer 4 (Directed Graph Module) 활성화.
-        feature_cols:        embedding_type='source_aware' 또는 graph_mode != None
-                             일 때 필요. WindowDataset.feature_cols.
-        embedding_type:      'flat' (FeatureEmbedding) 또는 'source_aware'
-                             (SourceAwareEmbedding with dynamic gating).
-                             default 'flat' (baseline).
-        gate_temperature:    embedding_type='source_aware'의 softmax temperature.
-                             default 1.0.
+        feature_cols:        필수. WindowDataset.feature_cols. SourceAwareEmbedding이
+                             소스별로 컬럼을 분할할 때 사용.
+        gate_temperature:    SourceAwareEmbedding softmax temperature. default 1.0.
 
     Shape:
         in  : (B, L, F)
@@ -136,7 +133,6 @@ class ForecastingModel(nn.Module):
         backbone_kwargs: dict | None = None,
         graph_mode: str | None = None,
         feature_cols: list[str] | None = None,
-        embedding_type: str = 'flat',
         gate_temperature: float = 1.0,
     ):
         super().__init__()
@@ -147,38 +143,29 @@ class ForecastingModel(nn.Module):
         self.target_dim = target_dim
         self.graph_mode = graph_mode
         self.decoder_type = decoder_type
-        self.embedding_type = embedding_type
 
-        if decoder_type not in ('mlp', 'horizon_query'):
+        if decoder_type not in ('mlp', 'horizon_query', 'target_head'):
             raise ValueError(
                 f"Unknown decoder_type={decoder_type!r}. "
-                "Expected 'mlp' or 'horizon_query'."
+                "Expected 'mlp', 'horizon_query', or 'target_head'."
             )
 
-        if embedding_type not in ('flat', 'source_aware'):
+        if feature_cols is None:
             raise ValueError(
-                f"Unknown embedding_type={embedding_type!r}. "
-                "Expected 'flat' or 'source_aware'."
+                "ForecastingModel requires feature_cols "
+                "(WindowDataset.feature_cols) for SourceAwareEmbedding."
             )
 
         bb_kwargs = dict(backbone_kwargs) if backbone_kwargs else {}
         # backbone factory에 d_model을 명시 전달 (override 없으면 default 128)
         bb_kwargs.setdefault('d_model', d_model)
 
-        # Layer 2
-        if embedding_type == 'source_aware':
-            if feature_cols is None:
-                raise ValueError(
-                    "embedding_type='source_aware' requires feature_cols "
-                    "(WindowDataset.feature_cols)."
-                )
-            self.embed = SourceAwareEmbedding(
-                feature_cols=feature_cols,
-                d_model=d_model,
-                gate_temperature=gate_temperature,
-            )
-        else:
-            self.embed = FeatureEmbedding(input_dim=input_dim, d_model=d_model)
+        # Layer 2: SourceAwareEmbedding (paper default)
+        self.embed = SourceAwareEmbedding(
+            feature_cols=feature_cols,
+            d_model=d_model,
+            gate_temperature=gate_temperature,
+        )
         # Layer 3 (swappable)
         self.backbone = build_backbone(backbone_name, **bb_kwargs)
 
@@ -211,13 +198,28 @@ class ForecastingModel(nn.Module):
             self.pool = TemporalGraphFusion(d_model=d_model)
 
         # Layer 6
-        decoder_cls = MLPDecoder if decoder_type == 'mlp' else HorizonQueryDecoder
-        self.decoder = decoder_cls(
-            d_model=d_model,
-            horizon=horizon,
-            target_dim=target_dim,
-            hidden_dim=decoder_hidden_dim,
-        )
+        if decoder_type == 'mlp':
+            self.decoder = MLPDecoder(
+                d_model=d_model,
+                horizon=horizon,
+                target_dim=target_dim,
+                hidden_dim=decoder_hidden_dim,
+            )
+        elif decoder_type == 'horizon_query':
+            self.decoder = HorizonQueryDecoder(
+                d_model=d_model,
+                horizon=horizon,
+                target_dim=target_dim,
+                hidden_dim=decoder_hidden_dim,
+            )
+        else:  # 'target_head'
+            self.decoder = TargetHeadMLPDecoder(
+                d_model=d_model,
+                horizon=horizon,
+                target_dim=target_dim,
+                shared_hidden_dim=decoder_hidden_dim,
+                head_hidden_dim=decoder_hidden_dim // 2,
+            )
 
     @classmethod
     def from_dataset(
@@ -229,17 +231,14 @@ class ForecastingModel(nn.Module):
         decoder_type: str = 'mlp',
         backbone_kwargs: dict | None = None,
         graph_mode: str | None = None,
-        embedding_type: str = 'flat',
         gate_temperature: float = 1.0,
     ) -> 'ForecastingModel':
         """WindowDataset에서 input_dim, horizon, target_dim, feature_cols 자동 추출.
 
         Example:
             ds = WindowDataset('Reference', 'train')
-            model = ForecastingModel.from_dataset(ds)                                       # baseline
-            model = ForecastingModel.from_dataset(ds, 'mamba', embedding_type='source_aware')  # 제안 임베딩
+            model = ForecastingModel.from_dataset(ds, 'mamba')
         """
-        need_cols = embedding_type == 'source_aware' or graph_mode is not None
         return cls(
             input_dim=dataset.feature_dim,
             backbone_name=backbone_name,
@@ -250,8 +249,7 @@ class ForecastingModel(nn.Module):
             decoder_type=decoder_type,
             backbone_kwargs=backbone_kwargs,
             graph_mode=graph_mode,
-            feature_cols=dataset.feature_cols if need_cols else None,
-            embedding_type=embedding_type,
+            feature_cols=dataset.feature_cols,
             gate_temperature=gate_temperature,
         )
 
