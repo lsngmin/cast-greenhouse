@@ -1,12 +1,14 @@
 """Train one forecasting run from the command line.
 
+Feature set is fixed at 53 (chain-preserving curated subset).
+
 Examples
 --------
 Single-compartment sanity run:
     python scripts/train_one.py --mode single --compartment Reference --backbone lstm --max-epochs 5
 
 Cross-compartment holdout run:
-    python scripts/train_one.py --mode cross --holdout Reference --feature-group sensor+weather+state+sp+vip
+    python scripts/train_one.py --mode cross --holdout Reference --backbone mamba
 """
 from __future__ import annotations
 
@@ -49,7 +51,6 @@ def parse_args() -> argparse.Namespace:
                         help="Held-out compartment used for cross mode.")
     parser.add_argument("--compartments", nargs="*", default=list(DEFAULT_COMPARTMENTS),
                         help="All compartments available for cross mode.")
-    parser.add_argument("--feature-group", default="sensor+weather+state+sp+vip")
     parser.add_argument("--backbone", default="lstm",
                         help="Backbone name passed to ForecastingModel.")
     parser.add_argument("--graph-mode", default=None,
@@ -70,6 +71,12 @@ def parse_args() -> argparse.Namespace:
                         choices=["mlp", "horizon_query"],
                         help="Decoder variant. mlp keeps existing baseline behavior; "
                              "horizon_query uses horizon embeddings and target heads.")
+    parser.add_argument("--embedding-type", default="flat",
+                        choices=["flat", "source_aware"],
+                        help="Layer-2 embedding. flat = single Linear+LayerNorm baseline; "
+                             "source_aware = per-source projection + dynamic gate.")
+    parser.add_argument("--gate-temperature", type=float, default=1.0,
+                        help="Softmax temperature for source-aware gate (lower = harder).")
 
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--eval-batch-size", type=int, default=64)
@@ -91,15 +98,14 @@ def make_run_name(args: argparse.Namespace) -> str:
     if args.run_name:
         return args.run_name
     split_name = args.compartment if args.mode == "single" else f"holdout-{args.holdout}"
-    group = args.feature_group.replace("+", "_")
     graph_tag = f"_g{args.graph_mode}" if args.graph_mode else ""
     decoder_tag = "_dhq" if args.decoder_type == "horizon_query" else ""
-    return f"{args.mode}_{split_name}_{args.backbone}{graph_tag}{decoder_tag}_{group}_seed{args.seed}"
+    embed_tag = "_esa" if args.embedding_type == "source_aware" else ""
+    return f"{args.mode}_{split_name}_{args.backbone}{graph_tag}{decoder_tag}{embed_tag}_seed{args.seed}"
 
 
 def build_datasets(args: argparse.Namespace) -> tuple[Any, Any, WindowDataset]:
     common = {
-        "feature_group": args.feature_group,
         "lookback": args.lookback,
         "horizon": args.horizon,
         "stride": args.stride,
@@ -157,6 +163,7 @@ def main() -> None:
     train_ds, val_ds, test_ds = build_datasets(args)
     shape_ds = dataset_for_shape(train_ds)
 
+    need_cols = (args.embedding_type == "source_aware") or (args.graph_mode is not None)
     model = ForecastingModel(
         input_dim=shape_ds.feature_dim,
         backbone_name=args.backbone,
@@ -166,7 +173,9 @@ def main() -> None:
         decoder_hidden_dim=args.decoder_hidden_dim,
         decoder_type=args.decoder_type,
         graph_mode=args.graph_mode,
-        feature_cols=shape_ds.feature_cols if args.graph_mode is not None else None,
+        feature_cols=shape_ds.feature_cols if need_cols else None,
+        embedding_type=args.embedding_type,
+        gate_temperature=args.gate_temperature,
     )
 
     train_loader = dataloader(train_ds, args.batch_size, shuffle=True,
