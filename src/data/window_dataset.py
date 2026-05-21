@@ -25,11 +25,7 @@ WindowDataset은 다음을 한 번에 처리:
     from torch.utils.data import DataLoader
     from src.data import WindowDataset
 
-    ds = WindowDataset(
-        compartment='Reference',
-        split='train',
-        feature_group='sensor+weather+state+sp+vip',
-    )
+    ds = WindowDataset(compartment='Reference', split='train')
     loader = DataLoader(ds, batch_size=32, shuffle=True)
 
     for x, y in loader:                      # x: (B, L, F), y: (B, H, V)
@@ -79,18 +75,19 @@ class WindowDataset(Dataset):
     Args:
         compartment:    Compartment 이름 (예: 'Reference').
         split:          'train' / 'val' / 'test'.
-        feature_group:  `feature_groups.FEATURE_GROUPS`의 키 (default: full).
         lookback:       lookback steps. default 288 (24h).
         horizon:        horizon steps. default 288 (24h).
         stride:         window stride. default 12 (1h).
         data_dir:       processed parquet 디렉토리. default 'data/processed'.
 
+    Feature 컬럼은 `feature_groups.ALL_FEATURES` (53개 curated set) 고정.
+
     Attributes:
-        X     : torch.Tensor (n, L, F) float32, scaled features
-        Y     : torch.Tensor (n, H, V) float32, scaled targets
+        X     : torch.Tensor (n, L, F=53) float32, scaled features
+        Y     : torch.Tensor (n, H, V=3) float32, scaled targets
         meta  : pd.DataFrame with [t0_idx, t0_ts, lookback_start_ts, t_pred_end_ts]
-        feature_cols : list[str]   — 사용된 feature 컬럼 이름
-        target_cols  : list[str]   — 사용된 target 컬럼 이름
+        feature_cols : list[str]   — 사용된 feature 컬럼 이름 (53개)
+        target_cols  : list[str]   — 사용된 target 컬럼 이름 (3개)
         cfg          : WindowConfig
         feature_dim  : int  — F (편의)
         target_dim   : int  — V (편의)
@@ -104,7 +101,6 @@ class WindowDataset(Dataset):
         self,
         compartment: str,
         split: str = 'train',
-        feature_group: str = 'sensor+weather+state+sp+vip',
         lookback: int = 288,
         horizon: int = 288,
         stride: int = 12,
@@ -113,7 +109,6 @@ class WindowDataset(Dataset):
         super().__init__()
         self.compartment = compartment
         self.split = split
-        self.feature_group = feature_group
         self.data_dir = Path(data_dir)
 
         cfg = win.WindowConfig(lookback=lookback, horizon=horizon, stride=stride)
@@ -121,7 +116,6 @@ class WindowDataset(Dataset):
             out_dir=self.data_dir,
             compartment=compartment,
             cfg=cfg,
-            feature_group=feature_group,
             splits=(split,),
         )
         split_data = bundle[split]
@@ -164,7 +158,7 @@ class WindowDataset(Dataset):
     def __repr__(self) -> str:
         return (
             f"WindowDataset(compartment={self.compartment!r}, "
-            f"split={self.split!r}, feature_group={self.feature_group!r}, "
+            f"split={self.split!r}, "
             f"n={len(self)}, X={tuple(self.X.shape)}, Y={tuple(self.Y.shape)})"
         )
 
@@ -172,7 +166,6 @@ class WindowDataset(Dataset):
 def make_concat_dataset(
     compartments: Sequence[str],
     split: str = 'train',
-    feature_group: str = 'sensor+weather+state+sp+vip',
     lookback: int = 288,
     horizon: int = 288,
     stride: int = 12,
@@ -189,7 +182,7 @@ def make_concat_dataset(
     """
     datasets = [
         WindowDataset(
-            compartment=c, split=split, feature_group=feature_group,
+            compartment=c, split=split,
             lookback=lookback, horizon=horizon, stride=stride, data_dir=data_dir,
         )
         for c in compartments
