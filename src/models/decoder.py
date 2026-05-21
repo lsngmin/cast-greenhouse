@@ -272,3 +272,122 @@ class HorizonQueryDecoder(nn.Module):
         return (f"d_model={self.d_model}, hidden_dim={self.hidden_dim}, "
                 f"horizon={self.horizon}, target_dim={self.target_dim}, "
                 f"params={n_params}")
+
+
+class TargetHeadMLPDecoder(nn.Module):
+    """Trajectory Decoder with per-target output heads (no horizon queries).
+
+    `MLPDecoder`가 마지막 Linear에서 H·V를 한꺼번에 출력하는 것과 달리, 본 변형은
+    shared trunk 뒤에 **target별 독립 head**를 둔다. trunk는 모든 target 공통,
+    각 head는 해당 target의 trajectory만 출력하므로 target-specific nonlinearity가
+    가능하다.
+
+    `HorizonQueryDecoder`와의 차이: 본 클래스는 horizon-query embedding을 쓰지
+    않고, 단일 context vector에서 각 head가 H step 전체를 직접 출력한다 (MLPDecoder
+    동일 패턴). 즉 `MLPDecoder`의 "마지막 Linear만 target별로 분리"한 최소 변경
+    버전.
+
+    구조:
+        shared trunk:
+            Linear(D → shared_hidden_dim)
+            GELU
+            Linear(shared_hidden_dim → shared_hidden_dim)
+            GELU
+        target heads (V개, 독립):
+            Linear(shared_hidden_dim → head_hidden_dim)
+            GELU
+            Linear(head_hidden_dim → H)
+
+    Args:
+        d_model:           input context dim D.
+        horizon:           output time steps H.
+        target_dim:        output variable count V (= head 개수).
+        shared_hidden_dim: shared trunk hidden dim. default 256.
+        head_hidden_dim:   target-head hidden dim. default 128.
+
+    Shape:
+        in  : (B, D)
+        out : (B, H, V)
+
+    Parameters (default D=128, shared=256, head=128, H=288, V=3):
+        Shared trunk:
+            Linear1 (D → 256)             : 128·256 + 256 = 33,024
+            Linear2 (256 → 256)           : 256·256 + 256 = 65,792
+        Per head (3개):
+            Linear_a (256 → 128)          : 256·128 + 128 = 32,896
+            Linear_b (128 → H=288)        : 128·288 + 288 = 37,152
+            head 1개                       : 70,048
+            heads 3개                      : 210,144
+        Total                              : 308,960
+
+    Comparison with ``MLPDecoder`` (320,864 params):
+        TargetHead는 약 12k 적음 (−3.7%). shared trunk capacity 동일,
+        마지막 Linear가 (256 → H·V) flat → target별 (256 → head_hidden → H)로
+        분리된 게 핵심 변경.
+    """
+
+    def __init__(
+        self,
+        d_model: int = 128,
+        horizon: int = 288,
+        target_dim: int = 3,
+        shared_hidden_dim: int = 256,
+        head_hidden_dim: int = 128,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.horizon = horizon
+        self.target_dim = target_dim
+        self.shared_hidden_dim = shared_hidden_dim
+        self.head_hidden_dim = head_hidden_dim
+
+        # Shared trunk: D → shared → shared, GELU sandwich (MLPDecoder 동일 구조)
+        self.shared = nn.Sequential(
+            nn.Linear(d_model, shared_hidden_dim, bias=True),
+            nn.GELU(),
+            nn.Linear(shared_hidden_dim, shared_hidden_dim, bias=True),
+            nn.GELU(),
+        )
+
+        # Per-target heads: shared_hidden → head_hidden → H
+        # 각 head는 독립 파라미터 (ModuleList). H step 전체를 한 번에 출력.
+        self.target_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(shared_hidden_dim, head_hidden_dim, bias=True),
+                nn.GELU(),
+                nn.Linear(head_hidden_dim, horizon, bias=True),
+            )
+            for _ in range(target_dim)
+        ])
+
+    def forward(self, c: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            c: (B, D) context vector from Pool layer.
+
+        Returns:
+            (B, H, V) forecast trajectory in scaled units.
+        """
+        if c.ndim != 2:
+            raise ValueError(
+                f"TargetHeadMLPDecoder expected shape (B, D), got {tuple(c.shape)}."
+            )
+        if c.shape[-1] != self.d_model:
+            raise ValueError(
+                f"TargetHeadMLPDecoder expected d_model={self.d_model}, "
+                f"got c.shape[-1]={c.shape[-1]}."
+            )
+
+        s = self.shared(c)                                           # (B, shared_hidden)
+        # 각 head: (B, shared_hidden) → (B, H). V개 stack → (B, H, V)
+        per_target = [head(s) for head in self.target_heads]         # V개 (B, H)
+        y = torch.stack(per_target, dim=-1)                          # (B, H, V)
+        return y
+
+    def extra_repr(self) -> str:
+        n_params = sum(p.numel() for p in self.parameters())
+        return (f"d_model={self.d_model}, "
+                f"shared_hidden_dim={self.shared_hidden_dim}, "
+                f"head_hidden_dim={self.head_hidden_dim}, "
+                f"horizon={self.horizon}, target_dim={self.target_dim}, "
+                f"params={n_params}")
