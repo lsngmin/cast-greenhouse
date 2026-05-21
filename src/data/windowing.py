@@ -204,42 +204,32 @@ def make_split_windows(
     target_cols: Sequence[str] = DEFAULT_TARGETS,
     splits: Sequence[str] = ('train', 'val', 'test'),
     feature_cols: Sequence[str] | None = None,
-    feature_group: str | None = None,
 ) -> dict:
     """단일 compartment에 대해 train/val/test 각각의 (X, Y, meta) 생성.
 
     Parameters
     ----------
-    feature_cols : 직접 컬럼 list 지정 (None이면 default).
-    feature_group : 'sensor', 'sensor+weather', ... — `feature_groups.FEATURE_GROUPS`의 키.
-                    `feature_cols`와 동시 지정 불가.
+    feature_cols : 직접 컬럼 list 지정. None이면 ALL_FEATURES (53개 curated set) 사용.
 
     Returns
     -------
     {'train': {'X':..., 'Y':..., 'meta':...}, 'val': {...}, 'test': {...},
      'feature_cols': [...], 'target_cols': [...], 'cfg': cfg, 'compartment': str}
     """
-    if feature_cols is not None and feature_group is not None:
-        raise ValueError('feature_cols와 feature_group 동시 지정 불가')
-
     art = load_artifacts(out_dir)
     df = load_processed(out_dir, compartment)
     scaler = art['scalers'][compartment]
     numeric_cols = art['columns']['numeric_cols']
 
-    if feature_group is not None:
+    if feature_cols is None:
         from src.data.feature_groups import get_feature_cols  # late import
-        feature_cols = get_feature_cols(feature_group,
-                                        available_cols=df.columns)
-    elif feature_cols is None:
-        feature_cols = default_feature_cols(art['columns'])
+        feature_cols = get_feature_cols(available_cols=df.columns)
     else:
         feature_cols = list(feature_cols)
 
     out = {'feature_cols': feature_cols,
            'target_cols': list(target_cols),
-           'cfg': cfg, 'compartment': compartment,
-           'feature_group': feature_group}
+           'cfg': cfg, 'compartment': compartment}
     for split in splits:
         sub = df[df['split'] == split]
         X, Y, meta = make_windows_scaled(
