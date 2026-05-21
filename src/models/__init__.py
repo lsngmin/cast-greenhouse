@@ -15,7 +15,7 @@ Layer 7 (Derived Variable: VPD), Layer 8 (Event-based metric)은 model 외부
 """
 from .embedding import FeatureEmbedding
 from .pooling import LastMeanPooling
-from .decoder import MLPDecoder
+from .decoder import HorizonQueryDecoder, MLPDecoder
 from .backbones import build_backbone, LSTMBackbone, TransformerBackbone, BACKBONE_NAMES
 from .graph import DirectedGraphModule, build_prior_adjacency, PRIOR_EDGES
 from .fusion import TemporalGraphFusion
@@ -25,6 +25,7 @@ __all__ = [
     'FeatureEmbedding',
     'LastMeanPooling',
     'MLPDecoder',
+    'HorizonQueryDecoder',
     'build_backbone', 'LSTMBackbone', 'TransformerBackbone', 'BACKBONE_NAMES',
     'DirectedGraphModule', 'build_prior_adjacency', 'PRIOR_EDGES',
     'TemporalGraphFusion',

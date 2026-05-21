@@ -66,6 +66,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stride", type=int, default=12)
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--decoder-hidden-dim", type=int, default=256)
+    parser.add_argument("--decoder-type", default="mlp",
+                        choices=["mlp", "horizon_query"],
+                        help="Decoder variant. mlp keeps existing baseline behavior; "
+                             "horizon_query uses horizon embeddings and target heads.")
 
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--eval-batch-size", type=int, default=64)
@@ -89,7 +93,8 @@ def make_run_name(args: argparse.Namespace) -> str:
     split_name = args.compartment if args.mode == "single" else f"holdout-{args.holdout}"
     group = args.feature_group.replace("+", "_")
     graph_tag = f"_g{args.graph_mode}" if args.graph_mode else ""
-    return f"{args.mode}_{split_name}_{args.backbone}{graph_tag}_{group}_seed{args.seed}"
+    decoder_tag = "_dhq" if args.decoder_type == "horizon_query" else ""
+    return f"{args.mode}_{split_name}_{args.backbone}{graph_tag}{decoder_tag}_{group}_seed{args.seed}"
 
 
 def build_datasets(args: argparse.Namespace) -> tuple[Any, Any, WindowDataset]:
@@ -159,6 +164,7 @@ def main() -> None:
         horizon=args.horizon,
         target_dim=shape_ds.target_dim,
         decoder_hidden_dim=args.decoder_hidden_dim,
+        decoder_type=args.decoder_type,
         graph_mode=args.graph_mode,
         feature_cols=shape_ds.feature_cols if args.graph_mode is not None else None,
     )

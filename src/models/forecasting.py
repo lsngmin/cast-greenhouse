@@ -87,7 +87,7 @@ import torch.nn as nn
 
 from .embedding import FeatureEmbedding
 from .pooling import LastMeanPooling
-from .decoder import MLPDecoder
+from .decoder import HorizonQueryDecoder, MLPDecoder
 from .backbones import build_backbone
 from .graph import DirectedGraphModule, build_prior_adjacency
 from .fusion import TemporalGraphFusion
@@ -106,6 +106,7 @@ class ForecastingModel(nn.Module):
         horizon:             출력 step 수 H. default 288 (24h).
         target_dim:          출력 변수 수 V. default 3 (Tair, Rhair, CO2air).
         decoder_hidden_dim:  MLPDecoder hidden. default 256.
+        decoder_type:        'mlp' | 'horizon_query'. default 'mlp'.
         backbone_kwargs:     backbone factory에 전달할 override (ablation용).
         graph_mode:          None | 'prior' | 'learned' | 'prior_learned'.
                              None이면 graph 미사용 (baseline). 나머지는
@@ -126,6 +127,7 @@ class ForecastingModel(nn.Module):
         horizon: int = 288,
         target_dim: int = 3,
         decoder_hidden_dim: int = 256,
+        decoder_type: str = 'mlp',
         backbone_kwargs: dict | None = None,
         graph_mode: str | None = None,
         feature_cols: list[str] | None = None,
@@ -137,6 +139,13 @@ class ForecastingModel(nn.Module):
         self.horizon = horizon
         self.target_dim = target_dim
         self.graph_mode = graph_mode
+        self.decoder_type = decoder_type
+
+        if decoder_type not in ('mlp', 'horizon_query'):
+            raise ValueError(
+                f"Unknown decoder_type={decoder_type!r}. "
+                "Expected 'mlp' or 'horizon_query'."
+            )
 
         bb_kwargs = dict(backbone_kwargs) if backbone_kwargs else {}
         # backbone factory에 d_model을 명시 전달 (override 없으면 default 128)
@@ -176,7 +185,8 @@ class ForecastingModel(nn.Module):
             self.pool = TemporalGraphFusion(d_model=d_model)
 
         # Layer 6
-        self.decoder = MLPDecoder(
+        decoder_cls = MLPDecoder if decoder_type == 'mlp' else HorizonQueryDecoder
+        self.decoder = decoder_cls(
             d_model=d_model,
             horizon=horizon,
             target_dim=target_dim,
@@ -190,6 +200,7 @@ class ForecastingModel(nn.Module):
         backbone_name: str = 'lstm',
         d_model: int = 128,
         decoder_hidden_dim: int = 256,
+        decoder_type: str = 'mlp',
         backbone_kwargs: dict | None = None,
         graph_mode: str | None = None,
     ) -> 'ForecastingModel':
@@ -207,6 +218,7 @@ class ForecastingModel(nn.Module):
             horizon=dataset.horizon,
             target_dim=dataset.target_dim,
             decoder_hidden_dim=decoder_hidden_dim,
+            decoder_type=decoder_type,
             backbone_kwargs=backbone_kwargs,
             graph_mode=graph_mode,
             feature_cols=dataset.feature_cols if graph_mode is not None else None,
@@ -223,8 +235,8 @@ class ForecastingModel(nn.Module):
         h = self.embed(x)            # (B, L, F)  → (B, L, D)
         h = self.backbone(h)         # (B, L, D)  → (B, L, D)
         if self.graph is not None:
-            g = self.graph(x)        # (B, L, F)  → (B, D)  — uses raw input
-            c = self.pool(h, g)      # TemporalGraphFusion: (B, L, D), (B, D) → (B, D)
+            g = self.graph(x)        # (B, L, F)  → (B, L, D)  — uses raw input
+            c = self.pool(h, g)      # TemporalGraphFusion: (B, L, D), (B, L, D) → (B, D)
         else:
             c = self.pool(h)         # LastMeanPooling: (B, L, D) → (B, D)
         y = self.decoder(c)          # (B, D)     → (B, H, V)
@@ -247,6 +259,6 @@ class ForecastingModel(nn.Module):
         return (
             f"input_dim={self.input_dim}, backbone={self.backbone_name!r}, "
             f"d_model={self.d_model}, horizon={self.horizon}, "
-            f"target_dim={self.target_dim}, "
+            f"target_dim={self.target_dim}, decoder_type={self.decoder_type!r}, "
             f"params={self.count_parameters()['total']}"
         )

@@ -124,6 +124,7 @@ def predict_scaled(
         horizon=dataset.horizon,
         target_dim=dataset.target_dim,
         decoder_hidden_dim=int(config["decoder_hidden_dim"]),
+        decoder_type=config.get("decoder_type", "mlp"),
         graph_mode=config.get("graph_mode"),
         feature_cols=dataset.feature_cols if config.get("graph_mode") is not None else None,
     )

@@ -194,3 +194,81 @@ class MLPDecoder(nn.Module):
         return (f"d_model={self.d_model}, hidden_dim={self.hidden_dim}, "
                 f"horizon={self.horizon}, target_dim={self.target_dim}, "
                 f"params={n_params}")
+
+
+class HorizonQueryDecoder(nn.Module):
+    """Horizon-query decoder with target-specific output heads.
+
+    Compared with ``MLPDecoder``, this decoder does not produce all H x V
+    outputs from one final flat linear layer. Instead, each horizon step has
+    a learned query embedding, and each target has its own small output head.
+    This keeps the direct multi-step contract while making the decoder
+    horizon-aware and target-specific.
+
+    Structure:
+        context c: (B, D)
+        learned horizon queries: (H, D)
+        z = LayerNorm(c[:, None, :] + query[None, :, :])  # (B, H, D)
+        shared MLP: D -> hidden -> hidden                 # (B, H, hidden)
+        target heads: hidden -> 1 per target              # (B, H, V)
+
+    Shape:
+        in  : (B, D)
+        out : (B, H, V)
+    """
+
+    def __init__(
+        self,
+        d_model: int = 128,
+        horizon: int = 288,
+        target_dim: int = 3,
+        hidden_dim: int = 256,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.horizon = horizon
+        self.target_dim = target_dim
+        self.hidden_dim = hidden_dim
+
+        self.horizon_query = nn.Embedding(horizon, d_model)
+        self.query_norm = nn.LayerNorm(d_model)
+        self.shared = nn.Sequential(
+            nn.Linear(d_model, hidden_dim, bias=True),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim, bias=True),
+            nn.GELU(),
+        )
+        self.target_heads = nn.ModuleList(
+            nn.Linear(hidden_dim, 1, bias=True) for _ in range(target_dim)
+        )
+
+    def forward(self, c: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            c: (B, D) context vector from Pool/Fusion layer.
+
+        Returns:
+            (B, H, V) forecast trajectory in scaled units.
+        """
+        if c.ndim != 2:
+            raise ValueError(
+                f"HorizonQueryDecoder expected shape (B, D), got {tuple(c.shape)}."
+            )
+        if c.shape[-1] != self.d_model:
+            raise ValueError(
+                f"HorizonQueryDecoder expected d_model={self.d_model}, "
+                f"got c.shape[-1]={c.shape[-1]}."
+            )
+
+        horizon_idx = torch.arange(self.horizon, device=c.device)
+        q = self.horizon_query(horizon_idx)                       # (H, D)
+        z = self.query_norm(c.unsqueeze(1) + q.unsqueeze(0))       # (B, H, D)
+        z = self.shared(z)                                        # (B, H, hidden)
+        y = torch.cat([head(z) for head in self.target_heads], dim=-1)
+        return y                                                  # (B, H, V)
+
+    def extra_repr(self) -> str:
+        n_params = sum(p.numel() for p in self.parameters())
+        return (f"d_model={self.d_model}, hidden_dim={self.hidden_dim}, "
+                f"horizon={self.horizon}, target_dim={self.target_dim}, "
+                f"params={n_params}")
