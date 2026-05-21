@@ -101,7 +101,6 @@ def build_test_dataset(config: dict[str, Any]) -> WindowDataset:
     return WindowDataset(
         compartment=test_compartment(config),
         split="test",
-        feature_group=config["feature_group"],
         lookback=int(config["lookback"]),
         horizon=int(config["horizon"]),
         stride=int(config["stride"]),
@@ -117,6 +116,8 @@ def predict_scaled(
     batch_size: int,
     device: torch.device,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    embedding_type = config.get("embedding_type", "flat")
+    need_cols = embedding_type == "source_aware" or config.get("graph_mode") is not None
     model = ForecastingModel(
         input_dim=dataset.feature_dim,
         backbone_name=config["backbone"],
@@ -126,7 +127,9 @@ def predict_scaled(
         decoder_hidden_dim=int(config["decoder_hidden_dim"]),
         decoder_type=config.get("decoder_type", "mlp"),
         graph_mode=config.get("graph_mode"),
-        feature_cols=dataset.feature_cols if config.get("graph_mode") is not None else None,
+        feature_cols=dataset.feature_cols if need_cols else None,
+        embedding_type=embedding_type,
+        gate_temperature=float(config.get("gate_temperature", 1.0)),
     )
     state = torch.load(run_dir / "model_best.pt", map_location=device)
     model.load_state_dict(state)
@@ -207,28 +210,6 @@ def summarize_event(
             "relative_mae": model["mean"] / max(persist["mean"], 1e-12),
         })
 
-    _, vpd_true, vpd_pred = M.vpd_metric_from_targets(
-        y_true, y_pred, target_cols, M.mae
-    )
-    _, _, vpd_persist = M.vpd_metric_from_targets(
-        y_true, y_persist, target_cols, M.mae
-    )
-    model = fast_event_window_mae(
-        np.abs(vpd_true - vpd_pred), event_starts, window_steps
-    )
-    persist = fast_event_window_mae(
-        np.abs(vpd_true - vpd_persist), event_starts, window_steps
-    )
-    rows.append({
-        "target": "VPD",
-        "window": window_label,
-        "window_steps": window_steps,
-        "n_events": model["n"],
-        "model_mae": model["mean"],
-        "model_std": model["std"],
-        "persistence_mae": persist["mean"],
-        "relative_mae": model["mean"] / max(persist["mean"], 1e-12),
-    })
     return rows
 
 
@@ -313,7 +294,6 @@ def evaluate_run(
                     "run": run_dir.name,
                     "mode": config["mode"],
                     "test_compartment": test_compartment(config),
-                    "feature_group": config["feature_group"],
                     "backbone": config["backbone"],
                     "seed": config["seed"],
                     "event_col": event_col,
