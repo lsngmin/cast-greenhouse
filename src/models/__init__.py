@@ -13,7 +13,7 @@ Layer 4 (Directed Graph) 및 Layer 5 (Fusion)은 baseline 통과 후 도입.
 Layer 7 (Derived Variable: VPD), Layer 8 (Event-based metric)은 model 외부
 (`src/metrics.py`)에서 처리.
 """
-from .embedding import FeatureEmbedding
+from .embedding import FeatureEmbedding, SourceAwareEmbedding
 from .pooling import LastMeanPooling
 from .decoder import HorizonQueryDecoder, MLPDecoder
 from .backbones import build_backbone, LSTMBackbone, TransformerBackbone, BACKBONE_NAMES
@@ -22,7 +22,7 @@ from .fusion import TemporalGraphFusion
 from .forecasting import ForecastingModel
 
 __all__ = [
-    'FeatureEmbedding',
+    'FeatureEmbedding', 'SourceAwareEmbedding',
     'LastMeanPooling',
     'MLPDecoder',
     'HorizonQueryDecoder',
