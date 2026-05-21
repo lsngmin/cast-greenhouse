@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 
 from src.data.window_dataset import WindowDataset, make_concat_dataset
 from src.models import ForecastingModel
-from src.train import Trainer
+from src.train import EventWeightedSmoothL1Loss, Trainer
 
 
 DEFAULT_COMPARTMENTS = (
@@ -68,15 +68,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--decoder-hidden-dim", type=int, default=256)
     parser.add_argument("--decoder-type", default="mlp",
-                        choices=["mlp", "horizon_query"],
+                        choices=["mlp", "horizon_query", "target_head"],
                         help="Decoder variant. mlp keeps existing baseline behavior; "
-                             "horizon_query uses horizon embeddings and target heads.")
-    parser.add_argument("--embedding-type", default="flat",
-                        choices=["flat", "source_aware"],
-                        help="Layer-2 embedding. flat = single Linear+LayerNorm baseline; "
-                             "source_aware = per-source projection + dynamic gate.")
+                             "horizon_query uses horizon embeddings + per-target heads; "
+                             "target_head keeps MLPDecoder trunk but splits the final "
+                             "Linear into per-target nonlinear heads.")
     parser.add_argument("--gate-temperature", type=float, default=1.0,
                         help="Softmax temperature for source-aware gate (lower = harder).")
+    parser.add_argument("--loss-mode", default="base",
+                        choices=["base", "event_1h", "event_decay"],
+                        help="Training objective. base=standard SmoothL1; "
+                             "event_1h boosts horizons up to 1h after control events; "
+                             "event_decay boosts post-event horizons with exponential decay.")
+    parser.add_argument("--event-loss-lambda", type=float, default=0.5,
+                        help="Extra loss weight for event horizons. 0.5 means event "
+                             "horizons receive up to 1.5x weight.")
+    parser.add_argument("--event-window-steps", type=int, default=12,
+                        help="Window length for --loss-mode event_1h. 12 steps = 1h.")
+    parser.add_argument("--event-decay-window-steps", type=int, default=72,
+                        help="Maximum window for --loss-mode event_decay. 72 steps = 6h.")
+    parser.add_argument("--event-decay-tau-steps", type=int, default=24,
+                        help="Decay time constant for --loss-mode event_decay. 24 steps = 2h.")
 
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--eval-batch-size", type=int, default=64)
@@ -99,9 +111,20 @@ def make_run_name(args: argparse.Namespace) -> str:
         return args.run_name
     split_name = args.compartment if args.mode == "single" else f"holdout-{args.holdout}"
     graph_tag = f"_g{args.graph_mode}" if args.graph_mode else ""
-    decoder_tag = "_dhq" if args.decoder_type == "horizon_query" else ""
-    embed_tag = "_esa" if args.embedding_type == "source_aware" else ""
-    return f"{args.mode}_{split_name}_{args.backbone}{graph_tag}{decoder_tag}{embed_tag}_seed{args.seed}"
+    decoder_tag = {
+        "mlp": "",
+        "horizon_query": "_dhq",
+        "target_head": "_dth",
+    }[args.decoder_type]
+    loss_tag = {
+        "base": "",
+        "event_1h": "_lew1h",
+        "event_decay": "_led6h",
+    }[args.loss_mode]
+    return (
+        f"{args.mode}_{split_name}_{args.backbone}{graph_tag}"
+        f"{decoder_tag}{loss_tag}_seed{args.seed}"
+    )
 
 
 def build_datasets(args: argparse.Namespace) -> tuple[Any, Any, WindowDataset]:
@@ -111,10 +134,19 @@ def build_datasets(args: argparse.Namespace) -> tuple[Any, Any, WindowDataset]:
         "stride": args.stride,
         "data_dir": args.data_dir,
     }
+    train_common = dict(common)
+    if args.loss_mode != "base":
+        train_common |= {
+            "event_weight_mode": args.loss_mode,
+            "event_loss_lambda": args.event_loss_lambda,
+            "event_window_steps": args.event_window_steps,
+            "event_decay_window_steps": args.event_decay_window_steps,
+            "event_decay_tau_steps": args.event_decay_tau_steps,
+        }
 
     if args.mode == "single":
-        train_ds = WindowDataset(args.compartment, split="train", **common)
-        val_ds = WindowDataset(args.compartment, split="val", **common)
+        train_ds = WindowDataset(args.compartment, split="train", **train_common)
+        val_ds = WindowDataset(args.compartment, split="val", **train_common)
         test_ds = WindowDataset(args.compartment, split="test", **common)
         return train_ds, val_ds, test_ds
 
@@ -122,8 +154,8 @@ def build_datasets(args: argparse.Namespace) -> tuple[Any, Any, WindowDataset]:
         raise ValueError(f"holdout={args.holdout!r} is not in compartments={args.compartments!r}")
 
     train_comps = [c for c in args.compartments if c != args.holdout]
-    train_ds = make_concat_dataset(train_comps, split="train", **common)
-    val_ds = make_concat_dataset(train_comps, split="val", **common)
+    train_ds = make_concat_dataset(train_comps, split="train", **train_common)
+    val_ds = make_concat_dataset(train_comps, split="val", **train_common)
     test_ds = WindowDataset(args.holdout, split="test", **common)
     return train_ds, val_ds, test_ds
 
@@ -163,7 +195,6 @@ def main() -> None:
     train_ds, val_ds, test_ds = build_datasets(args)
     shape_ds = dataset_for_shape(train_ds)
 
-    need_cols = (args.embedding_type == "source_aware") or (args.graph_mode is not None)
     model = ForecastingModel(
         input_dim=shape_ds.feature_dim,
         backbone_name=args.backbone,
@@ -173,8 +204,7 @@ def main() -> None:
         decoder_hidden_dim=args.decoder_hidden_dim,
         decoder_type=args.decoder_type,
         graph_mode=args.graph_mode,
-        feature_cols=shape_ds.feature_cols if need_cols else None,
-        embedding_type=args.embedding_type,
+        feature_cols=shape_ds.feature_cols,
         gate_temperature=args.gate_temperature,
     )
 
@@ -187,6 +217,10 @@ def main() -> None:
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
+        criterion=(
+            EventWeightedSmoothL1Loss(beta=0.5)
+            if args.loss_mode != "base" else None
+        ),
         optimizer_kwargs={"lr": args.lr, "weight_decay": args.weight_decay},
         early_stopping=args.patience,
         device=args.device,
