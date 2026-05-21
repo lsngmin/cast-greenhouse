@@ -33,6 +33,7 @@ STRIDE_DEFAULT  = 12    # 1 hour
 # VPD는 derived variable (Tair·Rhair로 계산 가능)이므로 직접 예측하지 않음.
 # 평가 단계에서 예측된 Tair/Rhair로 VPD 계산하여 metric 산출.
 DEFAULT_TARGETS = ('Tair', 'Rhair', 'CO2air')
+EVENT_WEIGHT_NONE = 'none'
 
 
 @dataclass
@@ -176,6 +177,74 @@ def make_windows_scaled(
     return make_windows(df, feature_cols, target_cols, cfg, starts=starts)
 
 
+def make_event_weights(
+    df: pd.DataFrame,
+    meta: pd.DataFrame,
+    cfg: WindowConfig,
+    mode: str = EVENT_WEIGHT_NONE,
+    event_cols: Sequence[str] | None = None,
+    event_loss_lambda: float = 0.5,
+    event_window_steps: int = 12,
+    event_decay_window_steps: int = 72,
+    event_decay_tau_steps: int = 24,
+) -> np.ndarray | None:
+    """Build per-horizon loss weights from future control-event flags.
+
+    The returned matrix is used only during training/validation loss
+    computation. It does not change model inputs or inference.
+
+    Returns
+    -------
+    event_weight : (n_samples, horizon) float32, or None when disabled.
+        Values are >= 1.0. General horizons keep weight 1.0, while horizons
+        following actuator/setpoint events receive additional weight.
+    """
+    if mode in (None, EVENT_WEIGHT_NONE, 'base'):
+        return None
+    if mode not in ('event_1h', 'event_decay'):
+        raise ValueError(
+            "mode must be one of {'none', 'base', 'event_1h', 'event_decay'}, "
+            f"got {mode!r}."
+        )
+
+    n = len(meta)
+    weights = np.ones((n, cfg.horizon), dtype=np.float32)
+    if n == 0 or event_loss_lambda <= 0:
+        return weights
+
+    if event_cols is None:
+        from src.data.feature_groups import ACTUATOR_EVENT_FLAGS, SETPOINT_EVENT_FLAGS
+        event_cols = list(ACTUATOR_EVENT_FLAGS) + list(SETPOINT_EVENT_FLAGS)
+    event_cols = [c for c in event_cols if c in df.columns]
+    if not event_cols:
+        return weights
+
+    events = df[event_cols].fillna(0).to_numpy(dtype=np.float32, copy=True)
+    event_any = (events > 0).any(axis=1)
+    t0_idx = meta['t0_idx'].to_numpy(dtype=np.int64)
+
+    if mode == 'event_1h':
+        window = max(int(event_window_steps), 1)
+        boost_value = 1.0 + float(event_loss_lambda)
+        for i, t0 in enumerate(t0_idx):
+            horizon_events = event_any[t0:min(t0 + cfg.horizon, len(event_any))]
+            for e in np.flatnonzero(horizon_events):
+                hi = min(cfg.horizon, e + window)
+                weights[i, e:hi] = np.maximum(weights[i, e:hi], boost_value)
+        return weights
+
+    window = max(int(event_decay_window_steps), 1)
+    tau = max(float(event_decay_tau_steps), 1.0)
+    decay = float(event_loss_lambda) * np.exp(-np.arange(window, dtype=np.float32) / tau)
+    for i, t0 in enumerate(t0_idx):
+        horizon_events = event_any[t0:min(t0 + cfg.horizon, len(event_any))]
+        for e in np.flatnonzero(horizon_events):
+            hi = min(cfg.horizon, e + window)
+            boost = 1.0 + decay[:hi - e]
+            weights[i, e:hi] = np.maximum(weights[i, e:hi], boost)
+    return weights
+
+
 # ---------------------------------------------------------------------------
 # Bulk helpers
 
@@ -204,6 +273,12 @@ def make_split_windows(
     target_cols: Sequence[str] = DEFAULT_TARGETS,
     splits: Sequence[str] = ('train', 'val', 'test'),
     feature_cols: Sequence[str] | None = None,
+    event_weight_mode: str = EVENT_WEIGHT_NONE,
+    event_loss_lambda: float = 0.5,
+    event_window_steps: int = 12,
+    event_decay_window_steps: int = 72,
+    event_decay_tau_steps: int = 24,
+    event_cols: Sequence[str] | None = None,
 ) -> dict:
     """단일 compartment에 대해 train/val/test 각각의 (X, Y, meta) 생성.
 
@@ -234,7 +309,21 @@ def make_split_windows(
         sub = df[df['split'] == split]
         X, Y, meta = make_windows_scaled(
             sub, scaler, numeric_cols, feature_cols, target_cols, cfg)
-        out[split] = {'X': X, 'Y': Y, 'meta': meta}
+        split_out = {'X': X, 'Y': Y, 'meta': meta}
+        event_weight = make_event_weights(
+            sub,
+            meta,
+            cfg,
+            mode=event_weight_mode,
+            event_cols=event_cols,
+            event_loss_lambda=event_loss_lambda,
+            event_window_steps=event_window_steps,
+            event_decay_window_steps=event_decay_window_steps,
+            event_decay_tau_steps=event_decay_tau_steps,
+        )
+        if event_weight is not None:
+            split_out['event_weight'] = event_weight
+        out[split] = split_out
     return out
 
 
