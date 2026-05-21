@@ -116,8 +116,6 @@ def predict_scaled(
     batch_size: int,
     device: torch.device,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    embedding_type = config.get("embedding_type", "flat")
-    need_cols = embedding_type == "source_aware" or config.get("graph_mode") is not None
     model = ForecastingModel(
         input_dim=dataset.feature_dim,
         backbone_name=config["backbone"],
@@ -127,8 +125,7 @@ def predict_scaled(
         decoder_hidden_dim=int(config["decoder_hidden_dim"]),
         decoder_type=config.get("decoder_type", "mlp"),
         graph_mode=config.get("graph_mode"),
-        feature_cols=dataset.feature_cols if need_cols else None,
-        embedding_type=embedding_type,
+        feature_cols=dataset.feature_cols,
         gate_temperature=float(config.get("gate_temperature", 1.0)),
     )
     state = torch.load(run_dir / "model_best.pt", map_location=device)
