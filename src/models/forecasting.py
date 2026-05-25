@@ -96,6 +96,9 @@ if TYPE_CHECKING:
     from src.data.window_dataset import WindowDataset
 
 
+DEFAULT_TARGET_COLS = ('Tair', 'Rhair', 'CO2air')
+
+
 class ForecastingModel(nn.Module):
     """End-to-end forecasting model: Embed → Backbone → Pool → Decoder.
 
@@ -134,6 +137,8 @@ class ForecastingModel(nn.Module):
         graph_mode: str | None = None,
         feature_cols: list[str] | None = None,
         gate_temperature: float = 1.0,
+        prediction_mode: str = 'absolute',
+        target_cols: list[str] | None = None,
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -143,11 +148,17 @@ class ForecastingModel(nn.Module):
         self.target_dim = target_dim
         self.graph_mode = graph_mode
         self.decoder_type = decoder_type
+        self.prediction_mode = prediction_mode
 
         if decoder_type not in ('mlp', 'horizon_query', 'target_head'):
             raise ValueError(
                 f"Unknown decoder_type={decoder_type!r}. "
                 "Expected 'mlp', 'horizon_query', or 'target_head'."
+            )
+        if prediction_mode not in ('absolute', 'residual'):
+            raise ValueError(
+                f"Unknown prediction_mode={prediction_mode!r}. "
+                "Expected 'absolute' or 'residual'."
             )
 
         if feature_cols is None:
@@ -155,6 +166,18 @@ class ForecastingModel(nn.Module):
                 "ForecastingModel requires feature_cols "
                 "(WindowDataset.feature_cols) for SourceAwareEmbedding."
             )
+        if target_cols is None:
+            target_cols = list(DEFAULT_TARGET_COLS[:target_dim])
+        if len(target_cols) != target_dim:
+            raise ValueError(
+                f"len(target_cols)={len(target_cols)} must match "
+                f"target_dim={target_dim}."
+            )
+        self.feature_cols = list(feature_cols)
+        self.target_cols = list(target_cols)
+        self.target_feature_idx = [
+            self.feature_cols.index(c) for c in self.target_cols
+        ]
 
         bb_kwargs = dict(backbone_kwargs) if backbone_kwargs else {}
         # backbone factory에 d_model을 명시 전달 (override 없으면 default 128)
@@ -232,6 +255,7 @@ class ForecastingModel(nn.Module):
         backbone_kwargs: dict | None = None,
         graph_mode: str | None = None,
         gate_temperature: float = 1.0,
+        prediction_mode: str = 'absolute',
     ) -> 'ForecastingModel':
         """WindowDataset에서 input_dim, horizon, target_dim, feature_cols 자동 추출.
 
@@ -251,6 +275,8 @@ class ForecastingModel(nn.Module):
             graph_mode=graph_mode,
             feature_cols=dataset.feature_cols,
             gate_temperature=gate_temperature,
+            prediction_mode=prediction_mode,
+            target_cols=dataset.target_cols,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -269,6 +295,9 @@ class ForecastingModel(nn.Module):
         else:
             c = self.pool(h)         # LastMeanPooling: (B, L, D) → (B, D)
         y = self.decoder(c)          # (B, D)     → (B, H, V)
+        if self.prediction_mode == 'residual':
+            base = x[:, -1, self.target_feature_idx].unsqueeze(1)
+            y = base + y
         return y
 
     def count_parameters(self) -> dict:
@@ -289,5 +318,6 @@ class ForecastingModel(nn.Module):
             f"input_dim={self.input_dim}, backbone={self.backbone_name!r}, "
             f"d_model={self.d_model}, horizon={self.horizon}, "
             f"target_dim={self.target_dim}, decoder_type={self.decoder_type!r}, "
+            f"prediction_mode={self.prediction_mode!r}, "
             f"params={self.count_parameters()['total']}"
         )

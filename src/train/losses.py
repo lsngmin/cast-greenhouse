@@ -11,6 +11,7 @@ class EventWeightedSmoothL1Loss(nn.Module):
 
     This is not a new base loss. It applies a temporal weight matrix to the
     standard SmoothL1 error so post-control-event horizons can be emphasized.
+    The weight can be shared across targets or target-specific.
 
     Args:
         beta: SmoothL1 beta passed to PyTorch.
@@ -20,7 +21,7 @@ class EventWeightedSmoothL1Loss(nn.Module):
 
     Shape:
         y_hat, y:     (B, H, V)
-        event_weight: (B, H) or (B, H, 1), values >= 1.0
+        event_weight: (B, H), (B, H, 1), or (B, H, V), values >= 1.0
     """
 
     supports_event_weight = True
@@ -45,10 +46,14 @@ class EventWeightedSmoothL1Loss(nn.Module):
             weight = weight.unsqueeze(-1)
         if weight.ndim != 3:
             raise ValueError(
-                "event_weight must have shape (B, H) or (B, H, 1), "
+                "event_weight must have shape (B, H), (B, H, 1), or (B, H, V), "
                 f"got {tuple(event_weight.shape)}."
             )
-        if weight.shape[0] != loss.shape[0] or weight.shape[1] != loss.shape[1]:
+        if (
+            weight.shape[0] != loss.shape[0]
+            or weight.shape[1] != loss.shape[1]
+            or weight.shape[2] not in (1, loss.shape[2])
+        ):
             raise ValueError(
                 f"event_weight shape {tuple(event_weight.shape)} is not "
                 f"compatible with loss shape {tuple(loss.shape)}."
@@ -65,3 +70,14 @@ class EventWeightedSmoothL1Loss(nn.Module):
             f"beta={self.beta}, "
             f"normalize_by_weight={self.normalize_by_weight}"
         )
+
+
+class EventTargetWeightedSmoothL1Loss(EventWeightedSmoothL1Loss):
+    """Alias for event-target matched weighting experiments.
+
+    The target-specific behavior is determined by the event_weight tensor
+    shape: (B, H, V) applies separate weights to Tair/Rhair/CO2air.
+    """
+
+
+EventTargetWeightedLoss = EventTargetWeightedSmoothL1Loss

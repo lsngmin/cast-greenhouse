@@ -34,6 +34,8 @@ STRIDE_DEFAULT  = 12    # 1 hour
 # 평가 단계에서 예측된 Tair/Rhair로 VPD 계산하여 metric 산출.
 DEFAULT_TARGETS = ('Tair', 'Rhair', 'CO2air')
 EVENT_WEIGHT_NONE = 'none'
+EVENT_TARGET_MODE_SHARED = 'shared'
+EVENT_TARGET_MODE_MATCHED = 'matched'
 
 
 @dataclass
@@ -181,7 +183,9 @@ def make_event_weights(
     df: pd.DataFrame,
     meta: pd.DataFrame,
     cfg: WindowConfig,
+    target_cols: Sequence[str] = DEFAULT_TARGETS,
     mode: str = EVENT_WEIGHT_NONE,
+    event_target_mode: str = EVENT_TARGET_MODE_SHARED,
     event_cols: Sequence[str] | None = None,
     event_loss_lambda: float = 0.5,
     event_window_steps: int = 12,
@@ -195,9 +199,11 @@ def make_event_weights(
 
     Returns
     -------
-    event_weight : (n_samples, horizon) float32, or None when disabled.
-        Values are >= 1.0. General horizons keep weight 1.0, while horizons
-        following actuator/setpoint events receive additional weight.
+    event_weight : float32 array, or None when disabled.
+        Shape is (n_samples, horizon) for shared weighting and
+        (n_samples, horizon, n_targets) for matched weighting. Values are
+        >= 1.0. General horizons keep weight 1.0, while horizons following
+        actuator/setpoint events receive additional weight.
     """
     if mode in (None, EVENT_WEIGHT_NONE, 'base'):
         return None
@@ -206,9 +212,18 @@ def make_event_weights(
             "mode must be one of {'none', 'base', 'event_1h', 'event_decay'}, "
             f"got {mode!r}."
         )
+    if event_target_mode not in (EVENT_TARGET_MODE_SHARED, EVENT_TARGET_MODE_MATCHED):
+        raise ValueError(
+            "event_target_mode must be one of {'shared', 'matched'}, "
+            f"got {event_target_mode!r}."
+        )
 
     n = len(meta)
-    weights = np.ones((n, cfg.horizon), dtype=np.float32)
+    target_cols = list(target_cols)
+    if event_target_mode == EVENT_TARGET_MODE_MATCHED:
+        weights = np.ones((n, cfg.horizon, len(target_cols)), dtype=np.float32)
+    else:
+        weights = np.ones((n, cfg.horizon), dtype=np.float32)
     if n == 0 or event_loss_lambda <= 0:
         return weights
 
@@ -220,8 +235,43 @@ def make_event_weights(
         return weights
 
     events = df[event_cols].fillna(0).to_numpy(dtype=np.float32, copy=True)
-    event_any = (events > 0).any(axis=1)
     t0_idx = meta['t0_idx'].to_numpy(dtype=np.int64)
+
+    if event_target_mode == EVENT_TARGET_MODE_MATCHED:
+        profiles = np.stack(
+            [_event_target_profile(c, target_cols) for c in event_cols],
+            axis=0,
+        )
+        active = profiles.sum(axis=1) > 0
+        if not active.any():
+            return weights
+
+        if mode == 'event_1h':
+            window = max(int(event_window_steps), 1)
+            for i, t0 in enumerate(t0_idx):
+                horizon_events = events[t0:min(t0 + cfg.horizon, len(events))]
+                for col_i in np.flatnonzero(active):
+                    for e in np.flatnonzero(horizon_events[:, col_i] > 0):
+                        hi = min(cfg.horizon, e + window)
+                        boost = 1.0 + float(event_loss_lambda) * profiles[col_i]
+                        weights[i, e:hi, :] = np.maximum(weights[i, e:hi, :], boost)
+            return weights
+
+        window = max(int(event_decay_window_steps), 1)
+        tau = max(float(event_decay_tau_steps), 1.0)
+        decay = float(event_loss_lambda) * np.exp(
+            -np.arange(window, dtype=np.float32) / tau
+        )
+        for i, t0 in enumerate(t0_idx):
+            horizon_events = events[t0:min(t0 + cfg.horizon, len(events))]
+            for col_i in np.flatnonzero(active):
+                for e in np.flatnonzero(horizon_events[:, col_i] > 0):
+                    hi = min(cfg.horizon, e + window)
+                    boost = 1.0 + decay[:hi - e, None] * profiles[col_i][None, :]
+                    weights[i, e:hi, :] = np.maximum(weights[i, e:hi, :], boost)
+        return weights
+
+    event_any = (events > 0).any(axis=1)
 
     if mode == 'event_1h':
         window = max(int(event_window_steps), 1)
@@ -243,6 +293,35 @@ def make_event_weights(
             boost = 1.0 + decay[:hi - e]
             weights[i, e:hi] = np.maximum(weights[i, e:hi], boost)
     return weights
+
+
+def _event_target_profile(event_col: str, target_cols: Sequence[str]) -> np.ndarray:
+    """Return target multipliers for one control-event column.
+
+    Multipliers encode the expected directness of the control pathway:
+    1.0 = direct target emphasis, 0.5 = secondary coupling, 0.0 = no boost.
+    """
+    profile_by_target = {name: 0.0 for name in target_cols}
+
+    if event_col in {
+        'VentLee_up', 'VentLee_down',
+        'Ventwind_up', 'Ventwind_down',
+        't_vent_sp_changed',
+    }:
+        profile_by_target.update({'Tair': 1.0, 'Rhair': 1.0, 'CO2air': 1.0})
+    elif event_col in {'co2_dos_on', 'co2_sp_changed'}:
+        profile_by_target.update({'CO2air': 1.0})
+    elif event_col == 't_heat_sp_changed':
+        profile_by_target.update({'Tair': 1.0, 'Rhair': 0.5})
+    elif event_col in {
+        'BlackScr_up', 'BlackScr_down',
+        'EnScr_up', 'EnScr_down',
+        'scr_blck_sp_changed', 'scr_enrg_sp_changed',
+    }:
+        profile_by_target.update({'Tair': 1.0, 'Rhair': 0.5})
+
+    return np.asarray([profile_by_target.get(t, 0.0) for t in target_cols],
+                      dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +353,7 @@ def make_split_windows(
     splits: Sequence[str] = ('train', 'val', 'test'),
     feature_cols: Sequence[str] | None = None,
     event_weight_mode: str = EVENT_WEIGHT_NONE,
+    event_target_mode: str = EVENT_TARGET_MODE_SHARED,
     event_loss_lambda: float = 0.5,
     event_window_steps: int = 12,
     event_decay_window_steps: int = 72,
@@ -314,7 +394,9 @@ def make_split_windows(
             sub,
             meta,
             cfg,
+            target_cols=target_cols,
             mode=event_weight_mode,
+            event_target_mode=event_target_mode,
             event_cols=event_cols,
             event_loss_lambda=event_loss_lambda,
             event_window_steps=event_window_steps,

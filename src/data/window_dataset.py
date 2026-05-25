@@ -106,6 +106,7 @@ class WindowDataset(Dataset):
         stride: int = 12,
         data_dir: Path | str = DEFAULT_DATA_DIR,
         event_weight_mode: str = win.EVENT_WEIGHT_NONE,
+        event_target_mode: str = win.EVENT_TARGET_MODE_SHARED,
         event_loss_lambda: float = 0.5,
         event_window_steps: int = 12,
         event_decay_window_steps: int = 72,
@@ -123,6 +124,7 @@ class WindowDataset(Dataset):
             cfg=cfg,
             splits=(split,),
             event_weight_mode=event_weight_mode,
+            event_target_mode=event_target_mode,
             event_loss_lambda=event_loss_lambda,
             event_window_steps=event_window_steps,
             event_decay_window_steps=event_decay_window_steps,
@@ -142,6 +144,7 @@ class WindowDataset(Dataset):
         self.target_cols = bundle['target_cols']
         self.cfg = cfg
         self.event_weight_mode = event_weight_mode
+        self.event_target_mode = event_target_mode
 
         # Trainer.test()에서 inverse_transform_Y 호출 시 필요
         art = win.load_artifacts(self.data_dir)
@@ -177,7 +180,8 @@ class WindowDataset(Dataset):
             f"WindowDataset(compartment={self.compartment!r}, "
             f"split={self.split!r}, "
             f"n={len(self)}, X={tuple(self.X.shape)}, Y={tuple(self.Y.shape)}, "
-            f"event_weight_mode={self.event_weight_mode!r})"
+            f"event_weight_mode={self.event_weight_mode!r}, "
+            f"event_target_mode={self.event_target_mode!r})"
         )
 
 
@@ -189,6 +193,7 @@ def make_concat_dataset(
     stride: int = 12,
     data_dir: Path | str = DEFAULT_DATA_DIR,
     event_weight_mode: str = win.EVENT_WEIGHT_NONE,
+    event_target_mode: str = win.EVENT_TARGET_MODE_SHARED,
     event_loss_lambda: float = 0.5,
     event_window_steps: int = 12,
     event_decay_window_steps: int = 72,
@@ -208,6 +213,7 @@ def make_concat_dataset(
             compartment=c, split=split,
             lookback=lookback, horizon=horizon, stride=stride, data_dir=data_dir,
             event_weight_mode=event_weight_mode,
+            event_target_mode=event_target_mode,
             event_loss_lambda=event_loss_lambda,
             event_window_steps=event_window_steps,
             event_decay_window_steps=event_decay_window_steps,

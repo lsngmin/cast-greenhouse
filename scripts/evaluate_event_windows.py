@@ -127,6 +127,8 @@ def predict_scaled(
         graph_mode=config.get("graph_mode"),
         feature_cols=dataset.feature_cols,
         gate_temperature=float(config.get("gate_temperature", 1.0)),
+        prediction_mode=config.get("prediction_mode", "absolute"),
+        target_cols=dataset.target_cols,
     )
     state = torch.load(run_dir / "model_best.pt", map_location=device)
     model.load_state_dict(state)

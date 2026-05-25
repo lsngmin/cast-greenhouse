@@ -28,7 +28,11 @@ if str(ROOT) not in sys.path:
 
 from src.data.window_dataset import WindowDataset, make_concat_dataset
 from src.models import ForecastingModel
-from src.train import EventWeightedSmoothL1Loss, Trainer
+from src.train import (
+    EventTargetWeightedSmoothL1Loss,
+    EventWeightedSmoothL1Loss,
+    Trainer,
+)
 
 
 DEFAULT_COMPARTMENTS = (
@@ -75,6 +79,11 @@ def parse_args() -> argparse.Namespace:
                              "Linear into per-target nonlinear heads.")
     parser.add_argument("--gate-temperature", type=float, default=1.0,
                         help="Softmax temperature for source-aware gate (lower = harder).")
+    parser.add_argument("--prediction-mode", default="absolute",
+                        choices=["absolute", "residual"],
+                        help="absolute predicts scaled target values directly; "
+                             "residual predicts deltas from the last observed "
+                             "target values, then adds the persistence baseline.")
     parser.add_argument("--loss-mode", default="base",
                         choices=["base", "event_1h", "event_decay"],
                         help="Training objective. base=standard SmoothL1; "
@@ -83,6 +92,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--event-loss-lambda", type=float, default=0.5,
                         help="Extra loss weight for event horizons. 0.5 means event "
                              "horizons receive up to 1.5x weight.")
+    parser.add_argument("--event-target-mode", default="shared",
+                        choices=["shared", "matched"],
+                        help="shared uses one event weight per horizon for all targets; "
+                             "matched uses event-target pathway weights for "
+                             "Tair/Rhair/CO2air.")
     parser.add_argument("--event-window-steps", type=int, default=12,
                         help="Window length for --loss-mode event_1h. 12 steps = 1h.")
     parser.add_argument("--event-decay-window-steps", type=int, default=72,
@@ -121,9 +135,15 @@ def make_run_name(args: argparse.Namespace) -> str:
         "event_1h": "_lew1h",
         "event_decay": "_led6h",
     }[args.loss_mode]
+    target_tag = (
+        "_etm"
+        if args.loss_mode != "base" and args.event_target_mode == "matched"
+        else ""
+    )
+    pred_tag = "_resid" if args.prediction_mode == "residual" else ""
     return (
         f"{args.mode}_{split_name}_{args.backbone}{graph_tag}"
-        f"{decoder_tag}{loss_tag}_seed{args.seed}"
+        f"{decoder_tag}{pred_tag}{loss_tag}{target_tag}_seed{args.seed}"
     )
 
 
@@ -138,6 +158,7 @@ def build_datasets(args: argparse.Namespace) -> tuple[Any, Any, WindowDataset]:
     if args.loss_mode != "base":
         train_common |= {
             "event_weight_mode": args.loss_mode,
+            "event_target_mode": args.event_target_mode,
             "event_loss_lambda": args.event_loss_lambda,
             "event_window_steps": args.event_window_steps,
             "event_decay_window_steps": args.event_decay_window_steps,
@@ -186,6 +207,14 @@ def json_default(obj: Any) -> Any:
     return str(obj)
 
 
+def build_criterion(args: argparse.Namespace):
+    if args.loss_mode == "base":
+        return None
+    if args.event_target_mode == "matched":
+        return EventTargetWeightedSmoothL1Loss(beta=0.5)
+    return EventWeightedSmoothL1Loss(beta=0.5)
+
+
 def main() -> None:
     args = parse_args()
     run_name = make_run_name(args)
@@ -206,6 +235,8 @@ def main() -> None:
         graph_mode=args.graph_mode,
         feature_cols=shape_ds.feature_cols,
         gate_temperature=args.gate_temperature,
+        prediction_mode=args.prediction_mode,
+        target_cols=shape_ds.target_cols,
     )
 
     train_loader = dataloader(train_ds, args.batch_size, shuffle=True,
@@ -217,10 +248,7 @@ def main() -> None:
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        criterion=(
-            EventWeightedSmoothL1Loss(beta=0.5)
-            if args.loss_mode != "base" else None
-        ),
+        criterion=build_criterion(args),
         optimizer_kwargs={"lr": args.lr, "weight_decay": args.weight_decay},
         early_stopping=args.patience,
         device=args.device,
